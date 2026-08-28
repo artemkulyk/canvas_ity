@@ -2202,6 +2202,49 @@ void canvas::lines_to_runs(
     {
         size_t beginning = ending;
         ending += lines.subpaths[ subpath ].count;
+        // Find the bounding box of the subpath in canvas coordinates.
+        // The extreme values are always attained by actual points, so
+        // testing them against the clip boundaries is equivalent to
+        // testing every point (floating-point addition is monotone).
+        xy minimum = lines.points[ beginning ];
+        xy maximum = minimum;
+        for ( size_t index = beginning + 1; index < ending; ++index )
+        {
+            xy point = lines.points[ index ];
+            minimum.x = std::min( minimum.x, point.x );
+            minimum.y = std::min( minimum.y, point.y );
+            maximum.x = std::max( maximum.x, point.x );
+            maximum.y = std::max( maximum.y, point.y );
+        }
+        minimum += offset;
+        maximum += offset;
+        // Completely beyond one side of the extended canvas: no part of
+        // the subpath can survive clipping, so skip it entirely.
+        if ( maximum.x < 0.0f || maximum.y < 0.0f ||
+             minimum.x > width || minimum.y > height )
+            continue;
+        // Completely within the extended canvas: clipping would keep
+        // every point unchanged, so scan-convert the points directly.
+        if ( minimum.x >= 0.0f && minimum.y >= 0.0f &&
+             maximum.x <= width && maximum.y <= height )
+        {
+            size_t last = ending - beginning;
+            for ( size_t index = 0; index < last; ++index )
+            {
+                xy from = lines.points[
+                    beginning + ( index ? index : last ) - 1 ];
+                xy to = lines.points[ beginning + index ];
+                add_runs( xy( std::min( std::max( from.x + offset.x,
+                                                  0.0f ), width ),
+                              std::min( std::max( from.y + offset.y,
+                                                  0.0f ), height ) ),
+                          xy( std::min( std::max( to.x + offset.x,
+                                                  0.0f ), width ),
+                              std::min( std::max( to.y + offset.y,
+                                                  0.0f ), height ) ) );
+            }
+            continue;
+        }
         scratch.points.clear();
         for ( size_t index = beginning; index < ending; ++index )
             scratch.points.push_back( offset + lines.points[ index ] );
