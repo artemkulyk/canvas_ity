@@ -1167,6 +1167,7 @@ private:
     line_path scratch;
     pixel_runs runs;
     pixel_runs mask;
+    bool clipped;
     pixel_runs scratch_runs;
     std::vector< size_t > row_counts;
     font_face face;
@@ -2689,10 +2690,11 @@ void canvas::draw_span(
 // read from left-to-right, top-to-bottom.  It scans through these to
 // determine spans of pixels that need to be drawn, paints those pixels
 // according to the brush, and then blends them into the buffer according
-// to the current compositing settings.  This is slightly more complicated
-// because it interleaves this with a simultaneous scan through a similar
-// set of runs representing the current clip mask to determine which pixels
-// it can composite into.  Note that shadows are always drawn first.
+// to the current compositing settings.  Unless a clip region has been
+// set, the clip mask is just the full canvas, which contributes full
+// visibility and only bounds each row at its edges; in that common case
+// the runs are walked directly instead of being merged against the
+// mask's two events per row.  Note that shadows are always drawn first.
 //
 void canvas::render_main(
     paint_brush const &brush )
@@ -2702,6 +2704,60 @@ void canvas::render_main(
     render_shadow( brush );
     lines_to_runs( xy( 0.0f, 0.0f ), 0 );
     int operation = global_composite_operation;
+    if ( !clipped )
+    {
+        // Walk the runs row by row, drawing the spans between them and
+        // finishing each row out to the canvas edge.  Where the
+        // compositing operation clears parts of the canvas outside the
+        // drawing, rows that the drawing does not touch must still be
+        // visited (i.e., cleared).
+        bool const clearing = ~operation & 8;
+        int x = 0;
+        int y = -1;
+        float path_sum = 0.0f;
+        for ( size_t index = 0; index < runs.size(); ++index )
+        {
+            pixel_run next = runs[ index ];
+            if ( next.y != y )
+            {
+                if ( y >= 0 )
+                {
+                    if ( size_x > x )
+                        draw_span( x, size_x, y,
+                                   std::min( fabsf( path_sum ), 1.0f ),
+                                   1.0f, brush );
+                    if ( clearing )
+                        for ( int gap = y + 1; gap < next.y; ++gap )
+                            draw_span( 0, size_x, gap, 0.0f, 1.0f, brush );
+                }
+                else if ( clearing )
+                    for ( int gap = 0; gap < next.y; ++gap )
+                        draw_span( 0, size_x, gap, 0.0f, 1.0f, brush );
+                x = 0;
+                y = next.y;
+                path_sum = 0.0f;
+            }
+            if ( next.x > x )
+                draw_span( x, next.x, y,
+                           std::min( fabsf( path_sum ), 1.0f ), 1.0f, brush );
+            x = next.x;
+            path_sum += next.delta;
+        }
+        if ( y >= 0 )
+        {
+            if ( size_x > x )
+                draw_span( x, size_x, y, std::min( fabsf( path_sum ), 1.0f ),
+                           1.0f, brush );
+            if ( clearing )
+                for ( int gap = y + 1; gap < size_y; ++gap )
+                    draw_span( 0, size_x, gap, 0.0f, 1.0f, brush );
+        }
+        else if ( clearing )
+            for ( int gap = 0; gap < size_y; ++gap )
+                draw_span( 0, size_x, gap, 0.0f, 1.0f, brush );
+        return;
+    }
+    static float const threshold = 1.0f / 8160.0f;
     int x = -1;
     int y = -1;
     float path_sum = 0.0f;
@@ -2716,7 +2772,6 @@ void canvas::render_main(
         float coverage = std::min( fabsf( path_sum ), 1.0f );
         float visibility = std::min( fabsf( clip_sum ), 1.0f );
         int to = next.y == y ? next.x : x + 1;
-        static float const threshold = 1.0f / 8160.0f;
         if ( x < to && ( ( coverage >= threshold || ~operation & 8 ) &&
                          visibility >= threshold ) )
             draw_span( x, to, y, coverage, visibility, brush );
@@ -2754,6 +2809,7 @@ canvas::canvas(
       fill_brush(),
       stroke_brush(),
       image_brush(),
+      clipped( false ),
       face(),
       bitmap( new rgba[ width * height ] ),
       saves( 0 )
@@ -3187,6 +3243,7 @@ void canvas::stroke()
 void canvas::clip()
 {
     path_to_lines( false );
+    clipped = true;
     lines_to_runs( xy( 0.0f, 0.0f ), 0 );
     size_t part = runs.size();
     runs.insert( runs.end(), mask.begin(), mask.end() );
@@ -3559,6 +3616,7 @@ void canvas::save()
     state->fill_brush = fill_brush;
     state->stroke_brush = stroke_brush;
     state->mask = mask;
+    state->clipped = clipped;
     state->face = face;
     state->saves = saves;
     saves = state;
@@ -3588,6 +3646,7 @@ void canvas::restore()
     fill_brush = state->fill_brush;
     stroke_brush = state->stroke_brush;
     mask = state->mask;
+    clipped = state->clipped;
     face = state->face;
     saves = state->saves;
     state->saves = 0;
