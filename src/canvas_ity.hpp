@@ -2889,6 +2889,15 @@ void canvas::draw_span(
     if ( solid )
     {
         rgba fore = coverage * global_alpha * brush.colors.front();
+        // For these compositing operations a fully transparent solid
+        // source leaves the destination exactly unchanged: the blend
+        // reduces to the destination for every pixel, so the span can
+        // be skipped entirely.
+        if ( fore.a == 0.0f &&
+             ( operation == source_over || operation == destination_over ||
+               operation == lighter || operation == exclusive_or ||
+               operation == destination_out || operation == source_atop ) )
+            return;
         float mix_back = operation & 4 ? fore.a : 0.0f;
         if ( operation & 8 )
             mix_back = 1.0f - mix_back;
