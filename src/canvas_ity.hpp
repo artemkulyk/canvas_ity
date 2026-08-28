@@ -2216,6 +2216,11 @@ void canvas::lines_to_runs(
     {
         size_t beginning = ending;
         ending += lines.subpaths[ subpath ].count;
+        // Degenerate subpaths with no points (possible in the output of
+        // stroke expansion for zero-length dash segments) contribute
+        // nothing and must be skipped before dereferencing the points.
+        if ( beginning == ending )
+            continue;
         // Find the bounding box of the subpath in canvas coordinates.
         // The extreme values are always attained by actual points, so
         // testing them against the clip boundaries is equivalent to
