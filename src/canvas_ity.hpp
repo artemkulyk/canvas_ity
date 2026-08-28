@@ -1347,9 +1347,24 @@ void canvas::add_tessellation(
     xy edge_2 = control_2 - control_1;
     xy edge_3 = point_2 - control_2;
     xy segment = point_2 - point_1;
-    float squared_1 = dot( edge_1, edge_1 );
-    float squared_2 = dot( edge_2, edge_2 );
-    float squared_3 = dot( edge_3, edge_3 );
+    float squared_1 = 0.0f;
+    float squared_2 = 0.0f;
+    float squared_3 = 0.0f;
+    float cosine = 1.0f;
+    if ( angular > -1.0f )
+    {
+        // These are only needed for the angular turn limit test used
+        // when expanding strokes, so skip them entirely when filling.
+        squared_1 = dot( edge_1, edge_1 );
+        squared_2 = dot( edge_2, edge_2 );
+        squared_3 = dot( edge_3, edge_3 );
+        if ( squared_1 * squared_3 != 0.0f )
+            cosine = dot( edge_1, edge_3 ) / sqrtf( squared_1 * squared_3 );
+        else if ( squared_1 * squared_2 != 0.0f )
+            cosine = dot( edge_1, edge_2 ) / sqrtf( squared_1 * squared_2 );
+        else if ( squared_2 * squared_3 != 0.0f )
+            cosine = dot( edge_2, edge_3 ) / sqrtf( squared_2 * squared_3 );
+    }
     static float const epsilon = 1.0e-4f;
     float length_squared = std::max( epsilon, dot( segment, segment ) );
     float projection_1 = dot( edge_1, segment ) / length_squared;
@@ -1358,16 +1373,6 @@ void canvas::add_tessellation(
     float clamped_2 = std::min( std::max( projection_2, 0.0f ), 1.0f );
     xy to_line_1 = point_1 + clamped_1 * segment - control_1;
     xy to_line_2 = point_2 - clamped_2 * segment - control_2;
-    float cosine = 1.0f;
-    if ( angular > -1.0f )
-    {
-        if ( squared_1 * squared_3 != 0.0f )
-            cosine = dot( edge_1, edge_3 ) / sqrtf( squared_1 * squared_3 );
-        else if ( squared_1 * squared_2 != 0.0f )
-            cosine = dot( edge_1, edge_2 ) / sqrtf( squared_1 * squared_2 );
-        else if ( squared_2 * squared_3 != 0.0f )
-            cosine = dot( edge_2, edge_3 ) / sqrtf( squared_2 * squared_3 );
-    }
     if ( ( dot( to_line_1, to_line_1 ) <= flatness &&
            dot( to_line_2, to_line_2 ) <= flatness &&
            cosine >= angular ) ||
@@ -1966,8 +1971,9 @@ void canvas::add_half_stroke(
     do
     {
         xy next = inverse * scratch.points[ index ];
-        xy out_direction = normalized( next - point );
-        float out_length = length( next - point );
+        xy edge = next - point;
+        float out_length = length( edge );
+        xy out_direction = 1.0f / std::max( 1.0e-6f, out_length ) * edge;
         static float const epsilon = 1.0e-4f;
         if ( in_length != 0.0f && out_length >= epsilon )
         {
