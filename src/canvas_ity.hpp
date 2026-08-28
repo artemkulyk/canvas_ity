@@ -2594,6 +2594,10 @@ void canvas::render_shadow(
     float divisor = 2.0f * ( alpha + static_cast< float >( radius ) ) + 1.0f;
     float weight_1 = alpha / divisor;
     float weight_2 = ( 1.0f - alpha ) / divisor;
+    // Each box blur pass slides a running sum along the row or column.
+    // The four bounded updates per element depend only on the position,
+    // so split the walk into head, middle, and tail sections where the
+    // bounds are constant and the updates can run without branching.
     for ( size_t y = 0; y < height; ++y )
         for ( int pass = 0; pass < 3; ++pass )
         {
@@ -2603,7 +2607,34 @@ void canvas::render_shadow(
             for ( size_t x = 0; x <= radius; ++x )
                 running += ( weight_1 + weight_2 ) * shadow[ working + x ];
             shadow[ y * width ] = running;
-            for ( size_t x = 1; x < width; ++x )
+            size_t middle_start = radius + 2 < width ? radius + 2 : width;
+            size_t middle_end = width > radius + 1 ? width - radius - 1 : 0;
+            if ( middle_start >= middle_end )
+            {
+                middle_start = 1;
+                middle_end = width;
+            }
+            for ( size_t x = 1; x < middle_start; ++x )
+            {
+                if ( x >= radius + 1 )
+                    running -= weight_2 * shadow[ working + x - radius - 1 ];
+                if ( x >= radius + 2 )
+                    running -= weight_1 * shadow[ working + x - radius - 2 ];
+                if ( x + radius < width )
+                    running += weight_2 * shadow[ working + x + radius ];
+                if ( x + radius + 1 < width )
+                    running += weight_1 * shadow[ working + x + radius + 1 ];
+                shadow[ y * width + x ] = running;
+            }
+            for ( size_t x = middle_start; x < middle_end; ++x )
+            {
+                running -= weight_2 * shadow[ working + x - radius - 1 ];
+                running -= weight_1 * shadow[ working + x - radius - 2 ];
+                running += weight_2 * shadow[ working + x + radius ];
+                running += weight_1 * shadow[ working + x + radius + 1 ];
+                shadow[ y * width + x ] = running;
+            }
+            for ( size_t x = middle_end; x < width; ++x )
             {
                 if ( x >= radius + 1 )
                     running -= weight_2 * shadow[ working + x - radius - 1 ];
@@ -2625,7 +2656,34 @@ void canvas::render_shadow(
             for ( size_t y = 0; y <= radius; ++y )
                 running += ( weight_1 + weight_2 ) * shadow[ working + y ];
             shadow[ x ] = running;
-            for ( size_t y = 1; y < height; ++y )
+            size_t middle_start = radius + 2 < height ? radius + 2 : height;
+            size_t middle_end = height > radius + 1 ? height - radius - 1 : 0;
+            if ( middle_start >= middle_end )
+            {
+                middle_start = 1;
+                middle_end = height;
+            }
+            for ( size_t y = 1; y < middle_start; ++y )
+            {
+                if ( y >= radius + 1 )
+                    running -= weight_2 * shadow[ working + y - radius - 1 ];
+                if ( y >= radius + 2 )
+                    running -= weight_1 * shadow[ working + y - radius - 2 ];
+                if ( y + radius < height )
+                    running += weight_2 * shadow[ working + y + radius ];
+                if ( y + radius + 1 < height )
+                    running += weight_1 * shadow[ working + y + radius + 1 ];
+                shadow[ y * width + x ] = running;
+            }
+            for ( size_t y = middle_start; y < middle_end; ++y )
+            {
+                running -= weight_2 * shadow[ working + y - radius - 1 ];
+                running -= weight_1 * shadow[ working + y - radius - 2 ];
+                running += weight_2 * shadow[ working + y + radius ];
+                running += weight_1 * shadow[ working + y + radius + 1 ];
+                shadow[ y * width + x ] = running;
+            }
+            for ( size_t y = middle_end; y < height; ++y )
             {
                 if ( y >= radius + 1 )
                     running -= weight_2 * shadow[ working + y - radius - 1 ];
