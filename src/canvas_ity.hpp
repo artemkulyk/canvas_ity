@@ -1195,8 +1195,13 @@ private:
     bool gradient_prepared;
     xy gradient_line;
     float gradient_span;
+    float gradient_reciprocal_span;
     float gradient_initial;
     float gradient_change;
+    rgba gradient_front;
+    rgba gradient_back;
+    std::vector< float > gradient_reciprocal_deltas;
+    std::vector< rgba > gradient_deltas;
 };
 
 }
@@ -2400,7 +2405,8 @@ rgba canvas::paint_pixel(
     {
         if ( span == 0.0f )
             return rgba( 0.0f, 0.0f, 0.0f, 0.0f );
-        offset = gradient / span;
+        offset = gradient_prepared ?
+            gradient * gradient_reciprocal_span : gradient / span;
     }
     else
     {
@@ -2431,6 +2437,17 @@ rgba canvas::paint_pixel(
     size_t index = static_cast< size_t >(
         std::upper_bound( brush.stops.begin(), brush.stops.end(), offset ) -
         brush.stops.begin() );
+    if ( gradient_prepared )
+    {
+        if ( index == 0 )
+            return gradient_front;
+        if ( index == brush.stops.size() )
+            return gradient_back;
+        float mix = ( offset - brush.stops[ index - 1 ] ) *
+            gradient_reciprocal_deltas[ index - 1 ];
+        return premultiplied( brush.colors[ index - 1 ] +
+                              mix * gradient_deltas[ index - 1 ] );
+    }
     if ( index == 0 )
         return premultiplied( brush.colors.front() );
     if ( index == brush.stops.size() )
@@ -2716,16 +2733,31 @@ void canvas::prepare_gradient(
     paint_brush const &brush )
 {
     gradient_prepared = false;
+    gradient_reciprocal_deltas.clear();
+    gradient_deltas.clear();
     if ( brush.colors.empty() ||
          ( brush.type != paint_brush::linear &&
            brush.type != paint_brush::radial ) )
         return;
+    gradient_front = premultiplied( brush.colors.front() );
+    gradient_back = premultiplied( brush.colors.back() );
+    size_t count = brush.stops.size();
+    gradient_reciprocal_deltas.reserve( count );
+    gradient_deltas.reserve( count );
+    for ( size_t index = 0; index + 1 < count; ++index )
+    {
+        gradient_reciprocal_deltas.push_back( 1.0f /
+            ( brush.stops[ index + 1 ] - brush.stops[ index ] ) );
+        gradient_deltas.push_back( brush.colors[ index + 1 ] -
+                                   brush.colors[ index ] );
+    }
     gradient_line = brush.end - brush.start;
     gradient_span = dot( gradient_line, gradient_line );
     if ( brush.type == paint_brush::linear )
     {
         if ( gradient_span == 0.0f )
             return;
+        gradient_reciprocal_span = 1.0f / gradient_span;
     }
     else
     {
