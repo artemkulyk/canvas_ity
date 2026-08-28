@@ -2515,6 +2515,12 @@ void canvas::render_shadow(
     shadow.clear();
     shadow.resize( working + std::max( width, height ) );
     static float const threshold = 1.0f / 8160.0f;
+    // For solid color paints, the shadow alpha is the same for every
+    // pixel of a span, so the paint lookup can be moved out of the
+    // per-pixel loop entirely.
+    bool const solid = brush.type == paint_brush::color &&
+                       !brush.colors.empty();
+    float const solid_alpha = solid ? brush.colors.front().a : 0.0f;
     {
         int x = -1;
         int y = -1;
@@ -2525,12 +2531,22 @@ void canvas::render_shadow(
             float coverage = std::min( fabsf( sum ), 1.0f );
             int to = next.y == y ? next.x : x + 1;
             if ( coverage >= threshold )
-                for ( ; x < to; ++x )
-                    shadow[ static_cast< size_t >( y - top ) * width +
-                            static_cast< size_t >( x - left ) ] = coverage *
-                        paint_pixel( xy( static_cast< float >( x ) + 0.5f,
-                                         static_cast< float >( y ) + 0.5f ) -
-                                     offset, brush ).a;
+            {
+                if ( solid )
+                {
+                    float value = coverage * solid_alpha;
+                    for ( ; x < to; ++x )
+                        shadow[ static_cast< size_t >( y - top ) * width +
+                                static_cast< size_t >( x - left ) ] = value;
+                }
+                else
+                    for ( ; x < to; ++x )
+                        shadow[ static_cast< size_t >( y - top ) * width +
+                                static_cast< size_t >( x - left ) ] = coverage *
+                            paint_pixel( xy( static_cast< float >( x ) + 0.5f,
+                                             static_cast< float >( y ) + 0.5f ) -
+                                         offset, brush ).a;
+            }
             if ( next.y != y )
                 sum = 0.0f;
             x = next.x;
@@ -2600,6 +2616,8 @@ void canvas::render_shadow(
         int to = std::min( next.y == y ? next.x : x + 1, right - border );
         if ( visibility >= threshold &&
              top <= y + border && y + border < bottom )
+        {
+            float complement = 1.0f - visibility;
             for ( ; x < to; ++x )
             {
                 rgba &back = bitmap[ y * size_x + x ];
@@ -2616,8 +2634,9 @@ void canvas::render_shadow(
                     mix_back = 1.0f - mix_back;
                 rgba blend = mix_fore * fore + mix_back * back;
                 blend.a = std::min( blend.a, 1.0f );
-                back = visibility * blend + ( 1.0f - visibility ) * back;
+                back = visibility * blend + complement * back;
             }
+        }
         if ( next.y != y )
             sum = 0.0f;
         x = std::max( static_cast< int >( next.x ), left - border );
