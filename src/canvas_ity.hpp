@@ -1167,6 +1167,8 @@ private:
     line_path scratch;
     pixel_runs runs;
     pixel_runs mask;
+    pixel_runs scratch_runs;
+    std::vector< size_t > row_counts;
     font_face face;
     rgba *bitmap;
     canvas *saves;
@@ -2283,7 +2285,49 @@ void canvas::lines_to_runs(
     }
     if ( runs.empty() )
         return;
-    std::sort( runs.begin(), runs.end() );
+    // Sort the runs into scan-line order.  Doing this as one global sort
+    // is costly: the runs from each polyline loop already arrive nearly
+    // in order, but different loops interleave, so a global sort spends
+    // many comparisons and much scattered memory traffic interleaving
+    // whole rows of runs that end up far apart.  Consumers only walk the
+    // runs row by row, so instead scatter the runs into per-row buckets
+    // with a counting sort and then sort each row's runs independently.
+    // Each row's sequence is short and contiguous, so sorting it is both
+    // much faster and much more cache friendly.
+    size_t highest = 0;
+    for ( size_t index = 0; index < runs.size(); ++index )
+        highest = std::max( highest,
+            static_cast< size_t >( runs[ index ].y ) );
+    if ( runs.size() >= 128 && highest < runs.size() )
+    {
+        row_counts.assign( highest + 1, 0 );
+        for ( size_t index = 0; index < runs.size(); ++index )
+            ++row_counts[ runs[ index ].y ];
+        size_t total = 0;
+        for ( size_t row = 0; row < row_counts.size(); ++row )
+        {
+            size_t count = row_counts[ row ];
+            row_counts[ row ] = total;
+            total += count;
+        }
+        scratch_runs.resize( runs.size() );
+        for ( size_t index = 0; index < runs.size(); ++index )
+            scratch_runs[ row_counts[ runs[ index ].y ]++ ] = runs[ index ];
+        size_t beginning = 0;
+        for ( size_t row = 0; row < row_counts.size(); ++row )
+        {
+            size_t row_end = row_counts[ row ];
+            if ( row_end - beginning > 1 )
+                std::sort( scratch_runs.begin() +
+                               static_cast< ptrdiff_t >( beginning ),
+                           scratch_runs.begin() +
+                               static_cast< ptrdiff_t >( row_end ) );
+            beginning = row_end;
+        }
+        runs.swap( scratch_runs );
+    }
+    else
+        std::sort( runs.begin(), runs.end() );
     size_t to = 0;
     for ( size_t from = 1; from < runs.size(); ++from )
         if ( runs[ from ].x == runs[ to ].x &&
