@@ -1185,6 +1185,7 @@ private:
     void stroke_lines();
     void add_runs( xy, xy );
     void lines_to_runs( xy, int );
+    void draw_span( int, int, int, float, float, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
     void render_main( paint_brush const & );
@@ -2582,6 +2583,88 @@ void canvas::render_shadow(
     }
 }
 
+// Blend one horizontal span of pixels into the pixel buffer.  The span
+// runs from pixel column "from" up to but not including column "to" of
+// row "y", with the given fractional coverage of the drawing and the
+// given fractional visibility from the clip mask.  The pixels are painted
+// according to the brush and blended according to the compositing
+// settings.  Span-invariant quantities (including the whole paint color
+// for solid brushes) are computed once; only the per-pixel blending
+// remains in the loops.
+//
+void canvas::draw_span(
+    int from,
+    int to,
+    int y,
+    float coverage,
+    float visibility,
+    paint_brush const &brush )
+{
+    int operation = global_composite_operation;
+    static float const threshold = 1.0f / 8160.0f;
+    if ( !( ( coverage >= threshold || ~operation & 8 ) &&
+            visibility >= threshold ) )
+        return;
+    bool const solid = brush.type == paint_brush::color &&
+                       !brush.colors.empty();
+    float complement = 1.0f - visibility;
+    int x = from;
+    if ( solid )
+    {
+        rgba fore = coverage * global_alpha * brush.colors.front();
+        float mix_back = operation & 4 ? fore.a : 0.0f;
+        if ( operation & 8 )
+            mix_back = 1.0f - mix_back;
+        if ( operation & 1 )
+        {
+            // The foreground mix depends on the destination alpha, but
+            // everything else is still span constant.
+            for ( ; x < to; ++x )
+            {
+                rgba &back = bitmap[ y * size_x + x ];
+                float mix_fore = back.a;
+                if ( operation & 2 )
+                    mix_fore = 1.0f - mix_fore;
+                rgba blend = mix_fore * fore + mix_back * back;
+                blend.a = std::min( blend.a, 1.0f );
+                back = visibility * blend + complement * back;
+            }
+        }
+        else
+        {
+            rgba term = ( operation & 2 ? 1.0f : 0.0f ) * fore;
+            for ( ; x < to; ++x )
+            {
+                rgba &back = bitmap[ y * size_x + x ];
+                rgba blend = term + mix_back * back;
+                blend.a = std::min( blend.a, 1.0f );
+                back = visibility * blend + complement * back;
+            }
+        }
+    }
+    else
+    {
+        float amount = coverage * global_alpha;
+        for ( ; x < to; ++x )
+        {
+            rgba &back = bitmap[ y * size_x + x ];
+            rgba fore = amount * paint_pixel(
+                xy( static_cast< float >( x ) + 0.5f,
+                    static_cast< float >( y ) + 0.5f ),
+                brush );
+            float mix_fore = operation & 1 ? back.a : 0.0f;
+            if ( operation & 2 )
+                mix_fore = 1.0f - mix_fore;
+            float mix_back = operation & 4 ? fore.a : 0.0f;
+            if ( operation & 8 )
+                mix_back = 1.0f - mix_back;
+            rgba blend = mix_fore * fore + mix_back * back;
+            blend.a = std::min( blend.a, 1.0f );
+            back = visibility * blend + complement * back;
+        }
+    }
+}
+
 // Render the polylines into the pixel buffer.  It scan-converts the lines
 // to runs which represent changes to the signed fractional coverage when
 // read from left-to-right, top-to-bottom.  It scans through these to
@@ -2615,25 +2698,9 @@ void canvas::render_main(
         float visibility = std::min( fabsf( clip_sum ), 1.0f );
         int to = next.y == y ? next.x : x + 1;
         static float const threshold = 1.0f / 8160.0f;
-        if ( ( coverage >= threshold || ~operation & 8 ) &&
-             visibility >= threshold )
-            for ( ; x < to; ++x )
-            {
-                rgba &back = bitmap[ y * size_x + x ];
-                rgba fore = coverage * global_alpha *
-                    paint_pixel( xy( static_cast< float >( x ) + 0.5f,
-                                     static_cast< float >( y ) + 0.5f ),
-                                 brush );
-                float mix_fore = operation & 1 ? back.a : 0.0f;
-                if ( operation & 2 )
-                    mix_fore = 1.0f - mix_fore;
-                float mix_back = operation & 4 ? fore.a : 0.0f;
-                if ( operation & 8 )
-                    mix_back = 1.0f - mix_back;
-                rgba blend = mix_fore * fore + mix_back * back;
-                blend.a = std::min( blend.a, 1.0f );
-                back = visibility * blend + ( 1.0f - visibility ) * back;
-            }
+        if ( x < to && ( ( coverage >= threshold || ~operation & 8 ) &&
+                         visibility >= threshold ) )
+            draw_span( x, to, y, coverage, visibility, brush );
         x = next.x;
         if ( next.y != y )
         {
