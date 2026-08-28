@@ -1169,7 +1169,9 @@ private:
     pixel_runs mask;
     bool clipped;
     pixel_runs scratch_runs;
+    pixel_runs scratch_runs2;
     std::vector< size_t > row_counts;
+    std::vector< size_t > x_counts;
     std::vector< float > x_weights;
     font_face face;
     rgba *bitmap;
@@ -2323,11 +2325,85 @@ void canvas::lines_to_runs(
         scratch_runs.resize( runs.size() );
         for ( size_t index = 0; index < runs.size(); ++index )
             scratch_runs[ row_counts[ runs[ index ].y ]++ ] = runs[ index ];
+        scratch_runs2.resize( runs.size() );
         size_t beginning = 0;
         for ( size_t row = 0; row < row_counts.size(); ++row )
         {
             size_t row_end = row_counts[ row ];
-            if ( row_end - beginning > 1 )
+            size_t count = row_end - beginning;
+            // For long rows, sorting by comparisons is costly: the runs
+            // within a row arrive as many short sequences of increasing
+            // column, so instead tally the runs per column and place
+            // them by column with a counting sort.  Runs for the same
+            // pixel must then be ordered by the magnitude of their
+            // coverage change, as the comparator would order them; a
+            // tiny insertion pass per pixel group does so.  Short rows
+            // are sorted directly.
+            if ( count >= 64 )
+            {
+                unsigned short lowest = scratch_runs[ beginning ].x;
+                unsigned short upper = lowest;
+                for ( size_t index = beginning + 1; index < row_end;
+                      ++index )
+                {
+                    lowest = std::min( lowest, scratch_runs[ index ].x );
+                    upper = std::max( upper, scratch_runs[ index ].x );
+                }
+                size_t span = size_t( upper - lowest ) + 1;
+                if ( span <= 4 * count )
+                {
+                    if ( x_counts.size() < span )
+                        x_counts.resize( span );
+                    for ( size_t index = 0; index < span; ++index )
+                        x_counts[ index ] = 0;
+                    for ( size_t index = beginning; index < row_end;
+                          ++index )
+                        ++x_counts[ scratch_runs[ index ].x - lowest ];
+                    size_t placed = 0;
+                    for ( size_t index = 0; index < span; ++index )
+                    {
+                        size_t tally = x_counts[ index ];
+                        x_counts[ index ] = placed;
+                        placed += tally;
+                    }
+                    for ( size_t index = beginning; index < row_end;
+                          ++index )
+                        scratch_runs2[ beginning +
+                            x_counts[ scratch_runs[ index ].x - lowest ]++ ] =
+                            scratch_runs[ index ];
+                    size_t group = beginning;
+                    for ( size_t index = beginning + 1; index <= row_end;
+                          ++index )
+                    {
+                        if ( index < row_end && scratch_runs2[ index ].x ==
+                             scratch_runs2[ index - 1 ].x )
+                            continue;
+                        for ( size_t place = group + 1; place < index;
+                              ++place )
+                        {
+                            pixel_run value = scratch_runs2[ place ];
+                            float magnitude = fabsf( value.delta );
+                            size_t hole = place;
+                            for ( ; hole > group && fabsf(
+                                      scratch_runs2[ hole - 1 ].delta ) >
+                                      magnitude; --hole )
+                                scratch_runs2[ hole ] =
+                                    scratch_runs2[ hole - 1 ];
+                            scratch_runs2[ hole ] = value;
+                        }
+                        group = index;
+                    }
+                    for ( size_t index = beginning; index < row_end;
+                          ++index )
+                        scratch_runs[ index ] = scratch_runs2[ index ];
+                }
+                else
+                    std::sort( scratch_runs.begin() +
+                                   static_cast< ptrdiff_t >( beginning ),
+                               scratch_runs.begin() +
+                                   static_cast< ptrdiff_t >( row_end ) );
+            }
+            else if ( count > 1 )
                 std::sort( scratch_runs.begin() +
                                static_cast< ptrdiff_t >( beginning ),
                            scratch_runs.begin() +
