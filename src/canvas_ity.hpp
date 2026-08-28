@@ -1169,6 +1169,7 @@ private:
     pixel_runs mask;
     pixel_runs scratch_runs;
     std::vector< size_t > row_counts;
+    std::vector< float > x_weights;
     font_face face;
     rgba *bitmap;
     canvas *saves;
@@ -1186,6 +1187,7 @@ private:
     void add_runs( xy, xy );
     void lines_to_runs( xy, int );
     void draw_span( int, int, int, float, float, paint_brush const & );
+    rgba paint_pattern( xy, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
     void render_main( paint_brush const & );
@@ -2340,15 +2342,101 @@ void canvas::lines_to_runs(
                 runs.end() );
 }
 
+// Sample a pattern or image brush at a point to produce a premultiplied,
+// linearized RGBA color.  This is the workhorse behind paint_pixel for
+// pattern brushes.  Patterns are resampled using a separable bicubic
+// convolution filter, with edges handled according to the wrap mode.  See
+// "Cubic Convolution Interpolation for Digital Image Processing" by Keys.
+// This filter is best known for magnification, but also works well for
+// antialiased minification, since it's actually a Catmull-Rom spline
+// approximation of Lanczos-2.  Keeping this in its own function also keeps
+// the surrounding code (with the color, gradient, and pattern branches)
+// small and compiles each part well.
+//
+rgba canvas::paint_pattern(
+    xy point,
+    paint_brush const &brush )
+{
+    float width = static_cast< float >( brush.width );
+    float height = static_cast< float >( brush.height );
+    if ( ( ( brush.repetition & 2 ) &&
+           ( point.x < 0.0f || width <= point.x ) ) ||
+         ( ( brush.repetition & 1 ) &&
+           ( point.y < 0.0f || height <= point.y ) ) )
+        return rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+    float scale_x = fabsf( inverse.a ) + fabsf( inverse.c );
+    float scale_y = fabsf( inverse.b ) + fabsf( inverse.d );
+    scale_x = std::max( 1.0f, std::min( scale_x, width * 0.25f ) );
+    scale_y = std::max( 1.0f, std::min( scale_y, height * 0.25f ) );
+    float reciprocal_x = 1.0f / scale_x;
+    float reciprocal_y = 1.0f / scale_y;
+    point -= xy( 0.5f, 0.5f );
+    int left = static_cast< int >( ceilf( point.x - scale_x * 2.0f ) );
+    int top = static_cast< int >( ceilf( point.y - scale_y * 2.0f ) );
+    int right = static_cast< int >( ceilf( point.x + scale_x * 2.0f ) );
+    int bottom = static_cast< int >( ceilf( point.y + scale_y * 2.0f ) );
+    bool const clamped = &brush == &image_brush;
+    rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+    float total_weight = 0.0f;
+    // The bicubic filter weight for each tapped column does not
+    // depend on the row, so evaluate it once per column instead of
+    // once per tapped pixel.
+    if ( x_weights.size() < static_cast< size_t >( right - left ) )
+        x_weights.resize( static_cast< size_t >( right - left ) );
+    for ( int pattern_x = left; pattern_x < right; ++pattern_x )
+    {
+        float x = fabsf( reciprocal_x *
+            ( static_cast< float >( pattern_x ) - point.x ) );
+        x_weights[ static_cast< size_t >( pattern_x - left ) ] =
+            ( x < 1.0f ?
+              (    1.5f * x - 2.5f ) * x          * x + 1.0f :
+              ( ( -0.5f * x + 2.5f ) * x - 4.0f ) * x + 2.0f );
+    }
+    for ( int pattern_y = top; pattern_y < bottom; ++pattern_y )
+    {
+        float y = fabsf( reciprocal_y *
+            ( static_cast< float >( pattern_y ) - point.y ) );
+        float weight_y = ( y < 1.0f ?
+            (    1.5f * y - 2.5f ) * y          * y + 1.0f :
+            ( ( -0.5f * y + 2.5f ) * y - 4.0f ) * y + 2.0f );
+        int wrapped_y = pattern_y % brush.height;
+        if ( wrapped_y < 0 )
+            wrapped_y += brush.height;
+        if ( clamped )
+            wrapped_y = std::min( std::max( pattern_y, 0 ),
+                                  brush.height - 1 );
+        size_t row = static_cast< size_t >( wrapped_y * brush.width );
+        int wrapped_x = left % brush.width;
+        if ( wrapped_x < 0 )
+            wrapped_x += brush.width;
+        for ( int pattern_x = left; pattern_x < right; ++pattern_x )
+        {
+            float weight = x_weights[
+                static_cast< size_t >( pattern_x - left ) ] * weight_y;
+            if ( !clamped )
+            {
+                if ( wrapped_x == brush.width )
+                    wrapped_x = 0;
+            }
+            else
+                wrapped_x = std::min( std::max( pattern_x, 0 ),
+                                      brush.width - 1 );
+            total_color += weight * brush.colors[
+                row + static_cast< size_t >( wrapped_x ) ];
+            total_weight += weight;
+            if ( !clamped )
+                ++wrapped_x;
+        }
+    }
+    return ( 1.0f / total_weight ) * total_color;
+}
+
 // Paint a pixel according to its point location and a paint style to produce
 // a premultiplied, linearized RGBA color.  This handles all supported paint
 // styles: solid colors, linear gradients, radial gradients, and patterns.
 // For gradients and patterns, it takes into account the current transform.
-// Patterns are resampled using a separable bicubic convolution filter,
-// with edges handled according to the wrap mode.  See "Cubic Convolution
-// Interpolation for Digital Image Processing" by Keys.  This filter is best
-// known for magnification, but also works well for antialiased minification,
-// since it's actually a Catmull-Rom spline approximation of Lanczos-2.
+// Patterns are resampled by paint_pattern using a separable bicubic
+// convolution filter.
 //
 rgba canvas::paint_pixel(
     xy point,
@@ -2360,62 +2448,7 @@ rgba canvas::paint_pixel(
         return brush.colors.front();
     point = inverse * point;
     if ( brush.type == paint_brush::pattern )
-    {
-        float width = static_cast< float >( brush.width );
-        float height = static_cast< float >( brush.height );
-        if ( ( ( brush.repetition & 2 ) &&
-               ( point.x < 0.0f || width <= point.x ) ) ||
-             ( ( brush.repetition & 1 ) &&
-               ( point.y < 0.0f || height <= point.y ) ) )
-            return rgba( 0.0f, 0.0f, 0.0f, 0.0f );
-        float scale_x = fabsf( inverse.a ) + fabsf( inverse.c );
-        float scale_y = fabsf( inverse.b ) + fabsf( inverse.d );
-        scale_x = std::max( 1.0f, std::min( scale_x, width * 0.25f ) );
-        scale_y = std::max( 1.0f, std::min( scale_y, height * 0.25f ) );
-        float reciprocal_x = 1.0f / scale_x;
-        float reciprocal_y = 1.0f / scale_y;
-        point -= xy( 0.5f, 0.5f );
-        int left = static_cast< int >( ceilf( point.x - scale_x * 2.0f ) );
-        int top = static_cast< int >( ceilf( point.y - scale_y * 2.0f ) );
-        int right = static_cast< int >( ceilf( point.x + scale_x * 2.0f ) );
-        int bottom = static_cast< int >( ceilf( point.y + scale_y * 2.0f ) );
-        rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
-        float total_weight = 0.0f;
-        for ( int pattern_y = top; pattern_y < bottom; ++pattern_y )
-        {
-            float y = fabsf( reciprocal_y *
-                ( static_cast< float >( pattern_y ) - point.y ) );
-            float weight_y = ( y < 1.0f ?
-                (    1.5f * y - 2.5f ) * y          * y + 1.0f :
-                ( ( -0.5f * y + 2.5f ) * y - 4.0f ) * y + 2.0f );
-            int wrapped_y = pattern_y % brush.height;
-            if ( wrapped_y < 0 )
-                wrapped_y += brush.height;
-            if ( &brush == &image_brush )
-                wrapped_y = std::min( std::max( pattern_y, 0 ),
-                                      brush.height - 1 );
-            for ( int pattern_x = left; pattern_x < right; ++pattern_x )
-            {
-                float x = fabsf( reciprocal_x *
-                    ( static_cast< float >( pattern_x ) - point.x ) );
-                float weight_x = ( x < 1.0f ?
-                    (    1.5f * x - 2.5f ) * x          * x + 1.0f :
-                    ( ( -0.5f * x + 2.5f ) * x - 4.0f ) * x + 2.0f );
-                int wrapped_x = pattern_x % brush.width;
-                if ( wrapped_x < 0 )
-                    wrapped_x += brush.width;
-                if ( &brush == &image_brush )
-                    wrapped_x = std::min( std::max( pattern_x, 0 ),
-                                          brush.width - 1 );
-                float weight = weight_x * weight_y;
-                size_t index = static_cast< size_t >(
-                    wrapped_y * brush.width + wrapped_x );
-                total_color += weight * brush.colors[ index ];
-                total_weight += weight;
-            }
-        }
-        return ( 1.0f / total_weight ) * total_color;
-    }
+        return paint_pattern( point, brush );
     float offset;
     xy relative = point - brush.start;
     xy line = brush.end - brush.start;
