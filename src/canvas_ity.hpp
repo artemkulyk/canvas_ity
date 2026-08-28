@@ -3055,14 +3055,22 @@ void canvas::set_pattern(
     paint_brush &brush = type == fill_style ? fill_brush : stroke_brush;
     brush.type = paint_brush::pattern;
     brush.colors.clear();
+    // Every red, green, or blue channel is one of the 256 byte values
+    // divided by 255, so linearize all 256 possible values up front
+    // rather than calling the (expensive) linearization once per pixel
+    // channel.
+    float table[ 256 ];
+    for ( int value = 0; value < 256; ++value )
+        table[ value ] = linearized(
+            static_cast< float >( value ) / 255.0f );
     for ( int y = 0; y < height; ++y )
         for ( int x = 0; x < width; ++x )
         {
             int index = y * stride + x * 4;
             rgba color = rgba(
-                image[ index + 0 ] / 255.0f, image[ index + 1 ] / 255.0f,
-                image[ index + 2 ] / 255.0f, image[ index + 3 ] / 255.0f );
-            brush.colors.push_back( premultiplied( linearized( color ) ) );
+                table[ image[ index + 0 ] ], table[ image[ index + 1 ] ],
+                table[ image[ index + 2 ] ], image[ index + 3 ] / 255.0f );
+            brush.colors.push_back( premultiplied( color ) );
         }
     brush.width = width;
     brush.height = height;
