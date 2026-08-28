@@ -1194,6 +1194,13 @@ private:
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
     void render_main( paint_brush const & );
+    void render_main_pass( paint_brush const & );
+    void prepare_gradient( paint_brush const & );
+    bool gradient_prepared;
+    xy gradient_line;
+    float gradient_span;
+    float gradient_initial;
+    float gradient_change;
 };
 
 }
@@ -2539,9 +2546,19 @@ rgba canvas::paint_pixel(
         return paint_pattern( point, brush );
     float offset;
     xy relative = point - brush.start;
-    xy line = brush.end - brush.start;
+    xy line;
+    float span;
+    if ( gradient_prepared )
+    {
+        line = gradient_line;
+        span = gradient_span;
+    }
+    else
+    {
+        line = brush.end - brush.start;
+        span = dot( line, line );
+    }
     float gradient = dot( relative, line );
-    float span = dot( line, line );
     if ( brush.type == paint_brush::linear )
     {
         if ( span == 0.0f )
@@ -2550,8 +2567,10 @@ rgba canvas::paint_pixel(
     }
     else
     {
-        float initial = brush.start_radius;
-        float change = brush.end_radius - initial;
+        float initial = gradient_prepared ? gradient_initial :
+            brush.start_radius;
+        float change = gradient_prepared ? gradient_change :
+            brush.end_radius - brush.start_radius;
         float a = span - change * change;
         float b = -2.0f * ( gradient + initial * change );
         float c = dot( relative, relative ) - initial * initial;
@@ -2906,6 +2925,37 @@ void canvas::draw_span(
     }
 }
 
+// Precompute the span-invariant parts of the current gradient paint so
+// that paint_pixel does not repeat per-pixel work that does not change
+// from pixel to pixel: the gradient axis, its squared length, and the
+// radial equation's endpoint radii.  Everything is recomputed once per
+// rendering call and invalidated afterwards; nothing is cached between
+// calls, so publicly calling paint_pixel outside a rendering pass uses
+// the ordinary full evaluation.
+//
+void canvas::prepare_gradient(
+    paint_brush const &brush )
+{
+    gradient_prepared = false;
+    if ( brush.colors.empty() ||
+         ( brush.type != paint_brush::linear &&
+           brush.type != paint_brush::radial ) )
+        return;
+    gradient_line = brush.end - brush.start;
+    gradient_span = dot( gradient_line, gradient_line );
+    if ( brush.type == paint_brush::linear )
+    {
+        if ( gradient_span == 0.0f )
+            return;
+    }
+    else
+    {
+        gradient_initial = brush.start_radius;
+        gradient_change = brush.end_radius - gradient_initial;
+    }
+    gradient_prepared = true;
+}
+
 // Render the polylines into the pixel buffer.  It scan-converts the lines
 // to runs which represent changes to the signed fractional coverage when
 // read from left-to-right, top-to-bottom.  It scans through these to
@@ -2918,6 +2968,16 @@ void canvas::draw_span(
 // mask's two events per row.  Note that shadows are always drawn first.
 //
 void canvas::render_main(
+    paint_brush const &brush )
+{
+    if ( forward.a * forward.d - forward.b * forward.c == 0.0f )
+        return;
+    prepare_gradient( brush );
+    render_main_pass( brush );
+    gradient_prepared = false;
+}
+
+void canvas::render_main_pass(
     paint_brush const &brush )
 {
     if ( forward.a * forward.d - forward.b * forward.c == 0.0f )
@@ -3031,6 +3091,7 @@ canvas::canvas(
       stroke_brush(),
       image_brush(),
       clipped( false ),
+      gradient_prepared( false ),
       face(),
       bitmap( new rgba[ width * height ] ),
       saves( 0 )
