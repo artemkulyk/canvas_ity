@@ -1189,10 +1189,12 @@ private:
     void add_runs( xy, xy );
     void lines_to_runs( xy, int );
     void draw_span( int, int, int, float, float, paint_brush const & );
+    void draw_opaque_span( int, int, int, float, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
     void render_main( paint_brush const & );
     void render_main_pass( paint_brush const & );
+    void render_opaque( paint_brush const & );
     void prepare_gradient( paint_brush const & );
     bool gradient_prepared;
     xy gradient_line;
@@ -2724,6 +2726,23 @@ void canvas::render_shadow(
 // for solid brushes) are computed once; only the per-pixel blending
 // remains in the loops.
 //
+void canvas::draw_opaque_span(
+    int from,
+    int to,
+    int y,
+    float coverage,
+    paint_brush const &brush )
+{
+    if ( to - from >= 16 && coverage == 1.0f )
+    {
+        rgba fore = brush.colors.front();
+        for ( int x = from; x < to; ++x )
+            bitmap[ y * size_x + x ] = fore;
+        return;
+    }
+    draw_span( from, to, y, coverage, 1.0f, brush );
+}
+
 void canvas::draw_span(
     int from,
     int to,
@@ -2864,6 +2883,35 @@ void canvas::render_main(
     gradient_prepared = false;
 }
 
+void canvas::render_opaque(
+    paint_brush const &brush )
+{
+    int x = 0;
+    int y = -1;
+    float path_sum = 0.0f;
+    for ( size_t index = 0; index < runs.size(); ++index )
+    {
+        pixel_run next = runs[ index ];
+        if ( next.y != y )
+        {
+            if ( y >= 0 && size_x > x )
+                draw_opaque_span( x, size_x, y,
+                    std::min( fabsf( path_sum ), 1.0f ), brush );
+            x = 0;
+            y = next.y;
+            path_sum = 0.0f;
+        }
+        if ( next.x > x )
+            draw_opaque_span( x, next.x, y,
+                std::min( fabsf( path_sum ), 1.0f ), brush );
+        x = next.x;
+        path_sum += next.delta;
+    }
+    if ( y >= 0 && size_x > x )
+        draw_opaque_span( x, size_x, y,
+            std::min( fabsf( path_sum ), 1.0f ), brush );
+}
+
 void canvas::render_main_pass(
     paint_brush const &brush )
 {
@@ -2872,6 +2920,13 @@ void canvas::render_main_pass(
     render_shadow( brush );
     lines_to_runs( xy( 0.0f, 0.0f ), 0 );
     int operation = global_composite_operation;
+    if ( !clipped && operation == source_over && global_alpha == 1.0f &&
+         brush.type == paint_brush::color && !brush.colors.empty() &&
+         brush.colors.front().a == 1.0f )
+    {
+        render_opaque( brush );
+        return;
+    }
     if ( !clipped )
     {
         // Walk the runs row by row, drawing the spans between them and
