@@ -2269,15 +2269,21 @@ void canvas::lines_to_runs(
     // with a counting sort and then sort each row's runs independently.
     // Each row's sequence is short and contiguous, so sorting it is both
     // much faster and much more cache friendly.
-    size_t highest = 0;
-    for ( size_t index = 0; index < runs.size(); ++index )
+    size_t lowest_y = runs.front().y;
+    size_t highest = lowest_y;
+    for ( size_t index = 1; index < runs.size(); ++index )
+    {
+        lowest_y = std::min( lowest_y,
+            static_cast< size_t >( runs[ index ].y ) );
         highest = std::max( highest,
             static_cast< size_t >( runs[ index ].y ) );
-    if ( runs.size() >= 128 && highest < runs.size() )
+    }
+    size_t row_span = highest - lowest_y + 1;
+    if ( runs.size() >= 64 && row_span < runs.size() )
     {
-        row_counts.assign( highest + 1, 0 );
+        row_counts.assign( row_span, 0 );
         for ( size_t index = 0; index < runs.size(); ++index )
-            ++row_counts[ runs[ index ].y ];
+            ++row_counts[ runs[ index ].y - lowest_y ];
         size_t total = 0;
         for ( size_t row = 0; row < row_counts.size(); ++row )
         {
@@ -2287,7 +2293,8 @@ void canvas::lines_to_runs(
         }
         scratch_runs.resize( runs.size() );
         for ( size_t index = 0; index < runs.size(); ++index )
-            scratch_runs[ row_counts[ runs[ index ].y ]++ ] = runs[ index ];
+            scratch_runs[
+                row_counts[ runs[ index ].y - lowest_y ]++ ] = runs[ index ];
         scratch_runs2.resize( runs.size() );
         size_t beginning = 0;
         for ( size_t row = 0; row < row_counts.size(); ++row )
