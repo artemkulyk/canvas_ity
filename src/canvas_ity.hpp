@@ -3345,9 +3345,10 @@ void canvas::set_color(
 {
     paint_brush &brush = type == fill_style ? fill_brush : stroke_brush;
     brush.type = paint_brush::color;
-    brush.colors.clear();
-    brush.colors.push_back( premultiplied( linearized( clamped(
-        rgba( red, green, blue, alpha ) ) ) ) );
+    rgba color = premultiplied( linearized( clamped(
+        rgba( red, green, blue, alpha ) ) ) );
+    brush.colors.resize( 1 );
+    brush.colors.front() = color;
 }
 
 void canvas::set_linear_gradient(
@@ -3740,14 +3741,14 @@ void canvas::fill_rectangle(
 {
     if ( width == 0.0f || height == 0.0f )
         return;
-    lines.points.clear();
-    lines.subpaths.clear();
-    lines.points.push_back( forward * xy( x, y ) );
-    lines.points.push_back( forward * xy( x + width, y ) );
-    lines.points.push_back( forward * xy( x + width, y + height ) );
-    lines.points.push_back( forward * xy( x, y + height ) );
+    lines.points.resize( 4 );
+    lines.subpaths.resize( 1 );
+    lines.points[ 0 ] = forward * xy( x, y );
+    lines.points[ 1 ] = forward * xy( x + width, y );
+    lines.points[ 2 ] = forward * xy( x + width, y + height );
+    lines.points[ 3 ] = forward * xy( x, y + height );
     subpath_data entry = { 4, true };
-    lines.subpaths.push_back( entry );
+    lines.subpaths.front() = entry;
     render_main( fill_brush );
 }
 
