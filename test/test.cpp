@@ -2210,7 +2210,7 @@ struct test
     { 0x129f9595, 256, 256, line_dash, "line_dash" },
     { 0x88a74152, 256, 256, line_dash_closed, "line_dash_closed" },
     { 0x064f194d, 256, 256, line_dash_overlap, "line_dash_overlap" },
-    { 0xf7259c0f, 256, 256, line_dash_offscreen, "line_dash_offscreen" },
+    { 0xf7249c0b, 256, 256, line_dash_offscreen, "line_dash_offscreen" },
     { 0xeb4338e8, 256, 256, color, "color" },
     { 0x6dc35a07, 256, 256, linear_gradient, "linear_gradient" },
     { 0x418fe678, 256, 256, radial_gradient, "radial_gradient" },
