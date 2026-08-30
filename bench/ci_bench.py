@@ -66,7 +66,9 @@ def compiler_banner(compiler: str) -> str:
 
 
 def compile_bench(root: Path, binary: Path, include: Path) -> str:
-    src = root / "bench" / "microbench.cpp"
+    src = (root / "bench" / "microbench.cpp").resolve()
+    binary = binary.resolve()
+    include = include.resolve()
     binary.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         compiler = "cl"

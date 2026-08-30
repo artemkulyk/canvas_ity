@@ -51,7 +51,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${BASE_REF:-}" ]; then
-            git fetch origin "${BASE_REF}" --no-tags || true
+            git cat-file -e "${BASE_REF}^{commit}" 2>/dev/null || \
+              git fetch origin "${BASE_REF}" --no-tags || \
+              git fetch origin "+${BASE_REF}:${BASE_REF}" --no-tags || true
             mkdir -p base-inc
             git show "${BASE_REF}:src/canvas_ity.hpp" > base-inc/canvas_ity.hpp
             python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json \
