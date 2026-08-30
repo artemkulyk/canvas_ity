@@ -184,7 +184,7 @@ def markdown_ab(report: dict) -> str:
         f"- {report['repeats']} interleaved process pairs after warmup, "
         f"best-of-{report['trials']} trials each",
         f"- geo-mean delta: **{report['geo_delta_pct']:+.1f}%** "
-        f"(base {report['geo_a']:.3f} ms → ours {report['geo_b']:.3f} ms)",
+        f"(base {report['geo_a']:.3f} ms -> ours {report['geo_b']:.3f} ms)",
         "",
         "| workload | base median | ours median | delta | spread base | spread ours |",
         "|---|---:|---:|---:|---:|---:|",
@@ -199,14 +199,15 @@ def markdown_ab(report: dict) -> str:
 
 def append_summary(text: str) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not path:
-        print(text)
-        return
-    with open(path, "a", encoding="utf-8") as handle:
-        handle.write(text)
-        if not text.endswith("\n"):
-            handle.write("\n")
-    print(text)
+    if path:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(text)
+            if not text.endswith("\n"):
+                handle.write("\n")
+    try:
+        print(text, flush=True)
+    except UnicodeEncodeError:
+        sys.stdout.buffer.write((text + "\n").encode(sys.stdout.encoding or "utf-8", errors="replace"))
 
 
 def bench(args: argparse.Namespace) -> int:
@@ -388,7 +389,7 @@ def summarize_ab(reports: list[dict], labels: list[str]) -> int:
             if name not in seen:
                 seen.add(name)
                 names.append(name)
-    header = "| workload | " + " | ".join(f"{tag} Δ" for tag in labels) + " |"
+    header = "| workload | " + " | ".join(f"{tag} d%" for tag in labels) + " |"
     sep = "|---|" + "|".join(["---:" for _ in labels]) + "|"
     lines = [
         "# Cross-platform A/B (ours vs base, percent; negative is faster)",
@@ -403,7 +404,7 @@ def summarize_ab(reports: list[dict], labels: list[str]) -> int:
             cells.append(f"{stats['delta_pct']:+.1f}%" if stats else "")
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
-    lines.append("| platform | geo base ms | geo ours ms | geo Δ |")
+    lines.append("| platform | geo base ms | geo ours ms | geo d% |")
     lines.append("|---|---:|---:|---:|")
     for report, tag in zip(reports, labels):
         lines.append(
