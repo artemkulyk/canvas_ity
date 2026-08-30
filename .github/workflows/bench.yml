@@ -1,0 +1,90 @@
+name: Bench
+
+on:
+  push:
+    branches:
+      - main
+      - eval/**
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: git ref for A/B baseline header (empty = single-tree on main)
+        required: false
+        default: ""
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Enable MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Fetch comparison refs
+        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/eval/') || github.event_name == 'workflow_dispatch'
+        run: git fetch origin main --no-tags --prune
+
+      - name: Run microbench
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.inputs.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BASE_REF:-}" ]; then
+            git fetch origin "${BASE_REF}" --no-tags || true
+            mkdir -p base-inc
+            git show "${BASE_REF}:src/canvas_ity.hpp" > base-inc/canvas_ity.hpp
+            python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json \
+              --base-include base-inc --base-label "${BASE_REF}"
+          elif [ "${REF}" != "refs/heads/main" ] || [ "${EVENT_NAME}" = "pull_request" ]; then
+            mkdir -p base-inc
+            git show origin/main:src/canvas_ity.hpp > base-inc/canvas_ity.hpp
+            python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json \
+              --base-include base-inc --base-label origin/main
+          else
+            python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench.json
+
+  summarize:
+    needs: bench
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: bench-*
+
+      - name: Cross-platform summary
+        run: python bench/ci_bench.py --summarize artifacts
