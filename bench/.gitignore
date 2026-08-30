@@ -1,0 +1,12 @@
+microbench
+microbench.exe
+*.o
+*.obj
+*.pdb
+*.ilk
+build/
+results/
+verify/bin/
+*.bin
+*.json
+!ci_bench.py
