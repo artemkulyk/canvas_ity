@@ -2803,6 +2803,113 @@ void canvas::draw_span(
     else
     {
         float amount = coverage * global_alpha;
+        if ( brush.type == paint_brush::pattern &&
+             !brush.colors.empty() &&
+             inverse.b == 0.0f && inverse.c == 0.0f )
+        {
+            // When the inverse transform is axis-aligned, the pattern's y
+            // coordinate, its y filter weights, and its wrapped y indices
+            // are the same for every pixel of one span, so compute them
+            // once per span instead of once per pixel.
+            float width = static_cast< float >( brush.width );
+            float height = static_cast< float >( brush.height );
+            float scale_y = std::max( 1.0f, std::min(
+                fabsf( inverse.d ), height * 0.25f ) );
+            float reciprocal_y = 1.0f / scale_y;
+            float point_y = inverse.d *
+                ( static_cast< float >( y ) + 0.5f ) + inverse.f;
+            bool y_tight = !( ( brush.repetition & 1 ) &&
+                              ( point_y < 0.0f || height <= point_y ) );
+            point_y -= 0.5f;
+            int top = static_cast< int >( ceilf( point_y - scale_y * 2.0f ) );
+            int bottom = static_cast< int >( ceilf( point_y + scale_y * 2.0f ) );
+            int taps = bottom - top;
+            if ( y_tight && 1 <= taps && taps <= 32 )
+            {
+                float weights_y[ 32 ];
+                int wrapped_y[ 32 ];
+                for ( int tap = 0; tap < taps; ++tap )
+                {
+                    int pattern_y = top + tap;
+                    float y_dist = fabsf( reciprocal_y *
+                        ( static_cast< float >( pattern_y ) - point_y ) );
+                    weights_y[ tap ] = ( y_dist < 1.0f ?
+                        (    1.5f * y_dist - 2.5f ) * y_dist * y_dist + 1.0f :
+                        ( ( -0.5f * y_dist + 2.5f ) * y_dist - 4.0f ) *
+                            y_dist + 2.0f );
+                    int wrapped = pattern_y % brush.height;
+                    if ( wrapped < 0 )
+                        wrapped += brush.height;
+                    if ( &brush == &image_brush )
+                        wrapped = std::min( std::max( pattern_y, 0 ),
+                                            brush.height - 1 );
+                    wrapped_y[ tap ] = wrapped * brush.width;
+                }
+                float scale_x = std::max( 1.0f, std::min(
+                    fabsf( inverse.a ), width * 0.25f ) );
+                float reciprocal_x = 1.0f / scale_x;
+                for ( ; x < to; ++x )
+                {
+                    rgba &back = bitmap[ y * size_x + x ];
+                    float point_x = inverse.a *
+                        ( static_cast< float >( x ) + 0.5f ) + inverse.e;
+                    rgba paint;
+                    if ( ( brush.repetition & 2 ) &&
+                         ( point_x < 0.0f || width <= point_x ) )
+                        paint = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+                    else
+                    {
+                        point_x -= 0.5f;
+                        int left = static_cast< int >( ceilf(
+                            point_x - scale_x * 2.0f ) );
+                        int right = static_cast< int >( ceilf(
+                            point_x + scale_x * 2.0f ) );
+                        rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+                        float total_weight = 0.0f;
+                        for ( int tap = 0; tap < taps; ++tap )
+                        {
+                            float weight_y = weights_y[ tap ];
+                            for ( int pattern_x = left;
+                                  pattern_x < right; ++pattern_x )
+                            {
+                                float x_dist = fabsf( reciprocal_x *
+                                    ( static_cast< float >( pattern_x ) -
+                                      point_x ) );
+                                float weight_x = ( x_dist < 1.0f ?
+                                    ( 1.5f * x_dist - 2.5f ) * x_dist *
+                                        x_dist + 1.0f :
+                                    ( ( -0.5f * x_dist + 2.5f ) * x_dist -
+                                      4.0f ) * x_dist + 2.0f );
+                                int wrapped_x = pattern_x % brush.width;
+                                if ( wrapped_x < 0 )
+                                    wrapped_x += brush.width;
+                                if ( &brush == &image_brush )
+                                    wrapped_x = std::min(
+                                        std::max( pattern_x, 0 ),
+                                        brush.width - 1 );
+                                float weight = weight_x * weight_y;
+                                size_t index = static_cast< size_t >(
+                                    wrapped_y[ tap ] + wrapped_x );
+                                total_color += weight * brush.colors[ index ];
+                                total_weight += weight;
+                            }
+                        }
+                        paint = ( 1.0f / total_weight ) * total_color;
+                    }
+                    rgba fore = amount * paint;
+                    float mix_fore = operation & 1 ? back.a : 0.0f;
+                    if ( operation & 2 )
+                        mix_fore = 1.0f - mix_fore;
+                    float mix_back = operation & 4 ? fore.a : 0.0f;
+                    if ( operation & 8 )
+                        mix_back = 1.0f - mix_back;
+                    rgba blend = mix_fore * fore + mix_back * back;
+                    blend.a = std::min( blend.a, 1.0f );
+                    back = visibility * blend + complement * back;
+                }
+                return;
+            }
+        }
         for ( ; x < to; ++x )
         {
             rgba &back = bitmap[ y * size_x + x ];
