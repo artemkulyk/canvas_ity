@@ -112,3 +112,118 @@ jobs:
           name: bench-renders-${{ matrix.os }}
           path: renders/*.png
           if-no-files-found: error
+
+  # Publish one illustrated report: medians for every OS side by side
+  # plus the rendered workload images, embedded by raw URL from the
+  # bench-renders branch (job summaries cannot inline artifact files).
+  # Replacing that disposable branch needs a force push, but it is not
+  # main; main itself is only ever fast-forwarded.
+  publish:
+    needs: bench
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - uses: actions/download-artifact@v6
+        with:
+          pattern: "bench-*"
+          path: all
+
+      - name: Push renders to the bench-renders branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir site
+          for dir in all/bench-renders-*; do
+            os="${dir#all/bench-renders-}"
+            mkdir -p "site/$os"
+            cp "$dir"/*.png "site/$os/"
+          done
+          cd site
+          git init -q -b bench-renders
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -qm "Bench renders for run ${GITHUB_RUN_ID}"
+          git push -q --force \
+            "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:bench-renders
+
+      - name: Write the illustrated report
+        run: |
+          set -euo pipefail
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          import os
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["GITHUB_RUN_ID"]
+          base = ("https://raw.githubusercontent.com/%s/"
+                  "bench-renders" % repo)
+          systems = []
+          for name in sorted(os.listdir("all")):
+              if name.startswith("bench-renders-"):
+                  systems.append(name[len("bench-renders-"):])
+          systems.sort(key=lambda s: s != "ubuntu-latest")
+          reports = []
+          for system in systems:
+              path = "all/bench-%s/bench.json" % system
+              with open(path, encoding="utf-8") as handle:
+                  reports.append((system, json.load(handle)))
+
+          print("# Bench report")
+          print("")
+          print("Run %s.  The images below are rendered by the same" % run_id)
+          print("code the timers measure; the PNGs also live on the")
+          print("`bench-renders` branch and in the `bench-renders-<os>`")
+          print("artifacts of this run.")
+          print("")
+          print("| workload | " + " | ".join(
+              "%s med ms (spread)" % system
+              for system, _ in reports) + " |")
+          print("|---|" + "|".join(["---:"] * len(reports)) + "|")
+
+          def medians(report, stats):
+              # Single-tree reports carry one median; A/B reports
+              # carry base and ours, and we show ours.
+              if "median_ms" in stats:
+                  return stats["median_ms"], stats["spread"]
+              return stats["median_b"], stats["spread_b"]
+
+          for name in reports[0][1]["workloads"]:
+              cells = []
+              for _, report in reports:
+                  stats = report["workloads"][name]
+                  med, spread = medians(report, stats)
+                  cells.append("%.1f (%.1f%%)" % (med, 100.0 * spread))
+              print("| %s | %s |" % (name, " | ".join(cells)))
+          geo_cells = []
+          for _, report in reports:
+              if "geo_ms" in report:
+                  geo_cells.append("%.1f" % report["geo_ms"])
+              else:
+                  geo_cells.append("%.1f (ours)" % report["geo_b"])
+          print("| **geo mean** | %s |" % " | ".join(geo_cells))
+          print("")
+          compilers = {system: report["compiler"]
+                       for system, report in reports}
+          for system in systems:
+              # The first system renders expanded; the rest collapse.
+              print("<details%s>" % (
+                  " open" if system == systems[0] else ""))
+              print("")
+              print("## %s (%s)" % (system, compilers[system]))
+              print("")
+              for name in reports[0][1]["workloads"]:
+                  print("![%s](%s/%s/%s.png)" % (name, base, system, name))
+              print("")
+              print("</details>")
+              print("")
+          EOF
