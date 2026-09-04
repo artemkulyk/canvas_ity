@@ -1199,6 +1199,7 @@ private:
     bool draw_linear_span( int, int, int, float, float,
                            paint_brush const & );
     void draw_opaque_span( int, int, int, float, paint_brush const & );
+    void fill_box( int, int, int, int, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
     void render_main( paint_brush const & );
@@ -2799,6 +2800,26 @@ void canvas::render_shadow(
 // for solid brushes) are computed once; only the per-pixel blending
 // remains in the loops.
 //
+// Fill an integer-aligned box of fully covered pixels directly,
+// bypassing scan conversion, run sorting, and per-span dispatch.
+// This is the analogue of Blend2D's BoxA path: rects that land on
+// pixel boundaries with an axis-aligned transform need no coverage
+// runs at all, since every pixel inside is fully covered.  Values
+// match the generic path exactly: the same draw_opaque_span calls
+// with coverage 1 that render_opaque would have issued for the
+// rect's runs are issued here in the same row order.
+//
+void canvas::fill_box(
+    int left,
+    int top,
+    int right,
+    int bottom,
+    paint_brush const &brush )
+{
+    for ( int y = top; y < bottom; ++y )
+        draw_opaque_span( left, right, y, 1.0f, brush );
+}
+
 void canvas::draw_opaque_span(
     int from,
     int to,
@@ -3430,6 +3451,86 @@ void canvas::render_main_pass(
     if ( forward.a * forward.d - forward.b * forward.c == 0.0f )
         return;
     render_shadow( brush );
+    // Blend2D-BoxA analogue: a single axis-aligned rect that lands on
+    // pixel boundaries skips scan conversion, sorting, and the run
+    // walk entirely.  Fires only when the transformed corners are
+    // exactly integral (same float products the path builder
+    // computes); the generic path would emit identical spans:
+    // fully-inside rects emit coverage-1 spans, and out-of-bounds
+    // edges clip to the same integer bounds below as the clipper
+    // plus scan-converter clamp would produce.
+    if ( !clipped && shadow_color.a == 0.0f &&
+         lines.subpaths.size() == 1 &&
+         lines.subpaths[ 0 ].count == 4 &&
+         lines.subpaths[ 0 ].closed &&
+         lines.points.size() == 4 &&
+         forward.b == 0.0f && forward.c == 0.0f )
+    {
+        float x_first = lines.points[ 0 ].x;
+        float y_first = lines.points[ 0 ].y;
+        float x_last = lines.points[ 2 ].x;
+        float y_last = lines.points[ 2 ].y;
+        // Bound the new int casts below; the generic path never
+        // converts these to int (it clamps in float), so without this
+        // huge coordinates would be new undefined behavior.
+        static float const bound = 1048576.0f;
+        if ( x_first == lines.points[ 3 ].x &&
+             y_first == lines.points[ 1 ].y &&
+             x_last == lines.points[ 1 ].x &&
+             y_last == lines.points[ 3 ].y &&
+             x_first == floorf( x_first ) &&
+             y_first == floorf( y_first ) &&
+             x_last == floorf( x_last ) &&
+             y_last == floorf( y_last ) &&
+             -bound <= x_first && x_first <= bound &&
+             -bound <= y_first && y_first <= bound &&
+             -bound <= x_last && x_last <= bound &&
+             -bound <= y_last && y_last <= bound )
+        {
+            int x0 = static_cast< int >( x_first );
+            int x1 = static_cast< int >( x_last );
+            int y0 = static_cast< int >( y_first );
+            int y1 = static_cast< int >( y_last );
+            if ( x0 > x1 )
+            {
+                int tmp = x0;
+                x0 = x1;
+                x1 = tmp;
+            }
+            if ( y0 > y1 )
+            {
+                int tmp = y0;
+                y0 = y1;
+                y1 = tmp;
+            }
+            // Clip to the canvas like the Sutherland-Hodgman clip plus
+            // the scan-converter clamp would: edges outside vanish,
+            // inside edges stay exact.  An empty rect falls through to
+            // the generic path: with a clearing composite operation
+            // even an empty drawing must still clear the canvas.
+            if ( x0 < 0 )
+                x0 = 0;
+            if ( y0 < 0 )
+                y0 = 0;
+            if ( x1 > size_x )
+                x1 = size_x;
+            if ( y1 > size_y )
+                y1 = size_y;
+            if ( x0 < x1 && y0 < y1 )
+            {
+                int operation = global_composite_operation;
+                if ( operation == source_over &&
+                     global_alpha == 1.0f &&
+                     brush.type == paint_brush::color &&
+                     !brush.colors.empty() &&
+                     brush.colors.front().a == 1.0f )
+                {
+                    fill_box( x0, y0, x1, y1, brush );
+                    return;
+                }
+            }
+        }
+    }
     lines_to_runs( xy( 0.0f, 0.0f ), 0 );
     int operation = global_composite_operation;
     if ( !clipped && operation == source_over && global_alpha == 1.0f &&
