@@ -2808,68 +2808,121 @@ bool canvas::draw_pattern_span(
         fabsf( inverse.a ), width * 0.25f ) );
     float reciprocal_x = 1.0f / scale_x;
     bool const clamped = &brush == &image_brush;
+    // With a unit x scale and no x offset, every pixel of the span taps
+    // the same columns shifted by whole pixels, so the column weights
+    // and wrapped indices are computed once per span and only the wrap
+    // counters advance per pixel.  All values match the per-pixel path
+    // exactly: columns shift by precisely one and weights depend only
+    // on whole-pixel offsets.
+    bool unit_x = !clamped &&
+        inverse.a == 1.0f && inverse.e == 0.0f;
+    float unit_weights_x[ 32 ];
+    int unit_wrapped_x[ 32 ];
+    int unit_cols = 0;
+    if ( unit_x )
+    {
+        float shifted = static_cast< float >( from );
+        int left = static_cast< int >( ceilf(
+            shifted - scale_x * 2.0f ) );
+        int right = static_cast< int >( ceilf(
+            shifted + scale_x * 2.0f ) );
+        unit_cols = right - left;
+        if ( unit_cols < 1 || 32 < unit_cols )
+            unit_x = false;
+        else
+        {
+            int wrapped = left % brush.width;
+            if ( wrapped < 0 )
+                wrapped += brush.width;
+            for ( int column = 0; column < unit_cols; ++column )
+            {
+                float x_dist = fabsf( reciprocal_x *
+                    ( static_cast< float >( left + column ) - shifted ) );
+                unit_weights_x[ column ] = ( x_dist < 1.0f ?
+                    ( 1.5f * x_dist - 2.5f ) * x_dist * x_dist + 1.0f :
+                    ( ( -0.5f * x_dist + 2.5f ) * x_dist - 4.0f ) *
+                        x_dist + 2.0f );
+                if ( wrapped == brush.width )
+                    wrapped = 0;
+                unit_wrapped_x[ column ] = wrapped;
+                ++wrapped;
+            }
+        }
+    }
     float amount = coverage * global_alpha;
     float complement = 1.0f - visibility;
     int operation = global_composite_operation;
     for ( int x = from; x < to; ++x )
     {
         rgba &back = bitmap[ y * size_x + x ];
-        float point_x = inverse.a *
-            ( static_cast< float >( x ) + 0.5f ) + inverse.e;
+        float point_x = unit_x ? static_cast< float >( x ) + 0.5f :
+            inverse.a * ( static_cast< float >( x ) + 0.5f ) + inverse.e;
         rgba paint;
         if ( ( brush.repetition & 2 ) &&
              ( point_x < 0.0f || width <= point_x ) )
             paint = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
         else
         {
-            point_x -= 0.5f;
-            int left = static_cast< int >( ceilf(
-                point_x - scale_x * 2.0f ) );
-            int right = static_cast< int >( ceilf(
-                point_x + scale_x * 2.0f ) );
-            if ( 32 < right - left )
-                paint = paint_pixel(
-                    xy( static_cast< float >( x ) + 0.5f,
-                        static_cast< float >( y ) + 0.5f ), brush );
-            else
+            float const *weights_xx = unit_weights_x;
+            int const *wrapped_xx = unit_wrapped_x;
+            int cols = unit_cols;
+            float weights_x[ 32 ];
+            int wrapped_x[ 32 ];
+            if ( !unit_x )
             {
+                point_x -= 0.5f;
+                int left = static_cast< int >( ceilf(
+                    point_x - scale_x * 2.0f ) );
+                int right = static_cast< int >( ceilf(
+                    point_x + scale_x * 2.0f ) );
+                cols = right - left;
                 // A column's bicubic weight and wrapped index do not
                 // depend on the row, so evaluate them once per column
                 // instead of once per tapped pixel, and walk the wrap
                 // with an incrementing counter instead of a division.
-                float weights_x[ 32 ];
-                int wrapped_x[ 32 ];
-                int wrapped = left % brush.width;
-                if ( wrapped < 0 )
-                    wrapped += brush.width;
-                for ( int column = left; column < right; ++column )
+                if ( 32 < cols )
+                    paint = paint_pixel(
+                        xy( static_cast< float >( x ) + 0.5f,
+                            static_cast< float >( y ) + 0.5f ), brush );
+                else
                 {
-                    float x_dist = fabsf( reciprocal_x *
-                        ( static_cast< float >( column ) - point_x ) );
-                    weights_x[ column - left ] = ( x_dist < 1.0f ?
-                        ( 1.5f * x_dist - 2.5f ) * x_dist * x_dist + 1.0f :
-                        ( ( -0.5f * x_dist + 2.5f ) * x_dist - 4.0f ) *
-                            x_dist + 2.0f );
-                    if ( clamped )
-                        wrapped = std::min( std::max( column, 0 ),
-                                            brush.width - 1 );
-                    else if ( wrapped == brush.width )
-                        wrapped = 0;
-                    wrapped_x[ column - left ] = wrapped;
-                    if ( !clamped )
-                        ++wrapped;
+                    int wrapped = left % brush.width;
+                    if ( wrapped < 0 )
+                        wrapped += brush.width;
+                    for ( int column = left; column < right; ++column )
+                    {
+                        float x_dist = fabsf( reciprocal_x *
+                            ( static_cast< float >( column ) - point_x ) );
+                        weights_x[ column - left ] = ( x_dist < 1.0f ?
+                            ( 1.5f * x_dist - 2.5f ) * x_dist * x_dist +
+                                1.0f :
+                            ( ( -0.5f * x_dist + 2.5f ) * x_dist - 4.0f ) *
+                                x_dist + 2.0f );
+                        if ( clamped )
+                            wrapped = std::min( std::max( column, 0 ),
+                                                brush.width - 1 );
+                        else if ( wrapped == brush.width )
+                            wrapped = 0;
+                        wrapped_x[ column - left ] = wrapped;
+                        if ( !clamped )
+                            ++wrapped;
+                    }
+                    weights_xx = weights_x;
+                    wrapped_xx = wrapped_x;
                 }
+            }
+            if ( unit_x || cols <= 32 )
+            {
                 rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
                 float total_weight = 0.0f;
                 for ( int tap = 0; tap < taps; ++tap )
                 {
                     float weight_y = weights_y[ tap ];
-                    for ( int column = left; column < right; ++column )
+                    for ( int column = 0; column < cols; ++column )
                     {
-                        float weight = weights_x[ column - left ] *
-                            weight_y;
+                        float weight = weights_xx[ column ] * weight_y;
                         size_t index = static_cast< size_t >(
-                            wrapped_y[ tap ] + wrapped_x[ column - left ] );
+                            wrapped_y[ tap ] + wrapped_xx[ column ] );
                         total_color += weight * brush.colors[ index ];
                         total_weight += weight;
                     }
@@ -2877,6 +2930,12 @@ bool canvas::draw_pattern_span(
                 paint = ( 1.0f / total_weight ) * total_color;
             }
         }
+        if ( unit_x )
+            for ( int column = 0; column < unit_cols; ++column )
+            {
+                if ( ++unit_wrapped_x[ column ] == brush.width )
+                    unit_wrapped_x[ column ] = 0;
+            }
         rgba fore = amount * paint;
         float mix_fore = operation & 1 ? back.a : 0.0f;
         if ( operation & 2 )
