@@ -3006,6 +3006,62 @@ bool canvas::draw_pattern_span(
             }
         }
     }
+    // With a dyadic fractional x scale, no x offset, and a clamped
+    // image brush, the fractional tap offsets repeat every few pixels,
+    // so each phase's column weights are computed once per span while a
+    // base column advances per use.  All values match the per-pixel path
+    // exactly, since every product here is an exact binary scaling.
+    int phases = 0;
+    if ( clamped && inverse.e == 0.0f && !unit_x )
+    {
+        if ( inverse.a == 0.5f )
+            phases = 2;
+        else if ( inverse.a == 0.25f )
+            phases = 4;
+    }
+    float phase_weights[ 4 ][ 32 ];
+    int phase_wrapped[ 4 ][ 32 ];
+    int phase_base[ 4 ];
+    int phase_cols[ 4 ];
+    bool phased = phases != 0 && phases <= to - from;
+    for ( int phase = 0; phased && phase < phases; ++phase )
+    {
+        int anchor = from + phase;
+        float shifted = inverse.a *
+            ( static_cast< float >( anchor ) + 0.5f ) - 0.5f;
+        int left = static_cast< int >( ceilf(
+            shifted - scale_x * 2.0f ) );
+        int right = static_cast< int >( ceilf(
+            shifted + scale_x * 2.0f ) );
+        int cols = right - left;
+        if ( cols < 1 || 32 < cols )
+        {
+            phased = false;
+            break;
+        }
+        phase_cols[ phase ] = cols;
+        phase_base[ phase ] = left;
+        int wrapped = left % brush.width;
+        if ( wrapped < 0 )
+            wrapped += brush.width;
+        for ( int column = 0; column < cols; ++column )
+        {
+            float x_dist = fabsf( reciprocal_x *
+                ( static_cast< float >( left + column ) - shifted ) );
+            phase_weights[ phase ][ column ] = ( x_dist < 1.0f ?
+                ( 1.5f * x_dist - 2.5f ) * x_dist * x_dist + 1.0f :
+                ( ( -0.5f * x_dist + 2.5f ) * x_dist - 4.0f ) *
+                    x_dist + 2.0f );
+            if ( clamped )
+                wrapped = std::min( std::max( left + column, 0 ),
+                                    brush.width - 1 );
+            else if ( wrapped == brush.width )
+                wrapped = 0;
+            phase_wrapped[ phase ][ column ] = wrapped;
+            if ( !clamped )
+                ++wrapped;
+        }
+    }
     float amount = coverage * global_alpha;
     float complement = 1.0f - visibility;
     int operation = global_composite_operation;
@@ -3023,9 +3079,23 @@ bool canvas::draw_pattern_span(
             float const *weights_xx = unit_weights_x;
             int const *wrapped_xx = unit_wrapped_x;
             int cols = unit_cols;
+            bool fallback = false;
             float weights_x[ 32 ];
             int wrapped_x[ 32 ];
-            if ( !unit_x )
+            if ( phased )
+            {
+                int phase = ( x - from ) & ( phases - 1 );
+                cols = phase_cols[ phase ];
+                weights_xx = phase_weights[ phase ];
+                for ( int column = 0; column < cols; ++column )
+                {
+                    int column_x = phase_base[ phase ] + column;
+                    wrapped_x[ column ] = std::min(
+                        std::max( column_x, 0 ), brush.width - 1 );
+                }
+                wrapped_xx = wrapped_x;
+            }
+            else if ( !unit_x )
             {
                 point_x -= 0.5f;
                 int left = static_cast< int >( ceilf(
@@ -3038,9 +3108,12 @@ bool canvas::draw_pattern_span(
                 // instead of once per tapped pixel, and walk the wrap
                 // with an incrementing counter instead of a division.
                 if ( 32 < cols )
+                {
                     paint = paint_pixel(
                         xy( static_cast< float >( x ) + 0.5f,
                             static_cast< float >( y ) + 0.5f ), brush );
+                    fallback = true;
+                }
                 else
                 {
                     int wrapped = left % brush.width;
@@ -3068,7 +3141,7 @@ bool canvas::draw_pattern_span(
                     wrapped_xx = wrapped_x;
                 }
             }
-            if ( unit_x || cols <= 32 )
+            if ( unit_x || !fallback )
             {
                 rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
                 float total_weight = 0.0f;
@@ -3093,6 +3166,8 @@ bool canvas::draw_pattern_span(
                 if ( ++unit_wrapped_x[ column ] == brush.width )
                     unit_wrapped_x[ column ] = 0;
             }
+        else if ( phased )
+            ++phase_base[ ( x - from ) & ( phases - 1 ) ];
         rgba fore = amount * paint;
         float mix_fore = operation & 1 ? back.a : 0.0f;
         if ( operation & 2 )
