@@ -1191,6 +1191,8 @@ private:
     void draw_span( int, int, int, float, float, paint_brush const & );
     bool draw_pattern_span( int, int, int, float, float,
                             paint_brush const & );
+    bool draw_radial_span( int, int, int, float, float,
+                           paint_brush const & );
     void draw_opaque_span( int, int, int, float, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
@@ -1204,6 +1206,7 @@ private:
     float gradient_reciprocal_span;
     float gradient_initial;
     float gradient_change;
+    float gradient_reciprocal_2a;
     rgba gradient_front;
     rgba gradient_back;
     std::vector< float > gradient_reciprocal_deltas;
@@ -2509,7 +2512,8 @@ rgba canvas::paint_pixel(
              ( span == 0.0f && change == 0.0f ) )
             return rgba( 0.0f, 0.0f, 0.0f, 0.0f );
         float root = sqrtf( discriminant );
-        float reciprocal = 1.0f / ( 2.0f * a );
+        float reciprocal = gradient_prepared ? gradient_reciprocal_2a :
+            1.0f / ( 2.0f * a );
         float offset_1 = ( -b - root ) * reciprocal;
         float offset_2 = ( -b + root ) * reciprocal;
         float radius_1 = initial + change * offset_1;
@@ -2752,6 +2756,96 @@ void canvas::draw_opaque_span(
     draw_span( from, to, y, coverage, 1.0f, brush );
 }
 
+// Paint one span with a radial gradient brush when the inverse transform
+// is axis-aligned.  The point's y coordinate and every y-only term of the
+// radial solve are then the same for the whole span, so they are computed
+// once here instead of once per pixel.  Returns true when the span was
+// painted (every value matches paint_pixel's arithmetic exactly) and
+// false to fall back to the generic per-pixel path.  Kept out of line so
+// the hot paths of draw_span below keep their shape for other brushes.
+//
+bool canvas::draw_radial_span(
+    int from,
+    int to,
+    int y,
+    float coverage,
+    float visibility,
+    paint_brush const &brush )
+{
+    float point_y = inverse.d *
+        ( static_cast< float >( y ) + 0.5f ) + inverse.f;
+    float relative_y = point_y - brush.start.y;
+    float gradient_y = relative_y * gradient_line.y;
+    float square_y = relative_y * relative_y;
+    float initial_change = gradient_initial * gradient_change;
+    float square_initial = gradient_initial * gradient_initial;
+    float span = gradient_span;
+    float change = gradient_change;
+    float reciprocal = gradient_reciprocal_2a;
+    bool degenerate = span == 0.0f && change == 0.0f;
+    float amount = coverage * global_alpha;
+    float complement = 1.0f - visibility;
+    int operation = global_composite_operation;
+    for ( int x = from; x < to; ++x )
+    {
+        rgba &back = bitmap[ y * size_x + x ];
+        float point_x = inverse.a *
+            ( static_cast< float >( x ) + 0.5f ) + inverse.e;
+        float relative_x = point_x - brush.start.x;
+        float gradient = relative_x * gradient_line.x + gradient_y;
+        float b = -2.0f * ( gradient + initial_change );
+        float c = relative_x * relative_x + square_y - square_initial;
+        float a = span - change * change;
+        float discriminant = b * b - 4.0f * a * c;
+        rgba paint;
+        if ( discriminant < 0.0f || degenerate )
+            paint = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+        else
+        {
+            float root = sqrtf( discriminant );
+            float offset_1 = ( -b - root ) * reciprocal;
+            float offset_2 = ( -b + root ) * reciprocal;
+            float radius_1 = gradient_initial + change * offset_1;
+            float radius_2 = gradient_initial + change * offset_2;
+            float offset = 0.0f;
+            if ( radius_2 >= 0.0f )
+                offset = offset_2;
+            else if ( radius_1 >= 0.0f )
+                offset = offset_1;
+            else
+                paint = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+            if ( radius_2 >= 0.0f || radius_1 >= 0.0f )
+            {
+                size_t index = static_cast< size_t >( std::upper_bound(
+                    brush.stops.begin(), brush.stops.end(), offset ) -
+                    brush.stops.begin() );
+                if ( index == 0 )
+                    paint = gradient_front;
+                else if ( index == brush.stops.size() )
+                    paint = gradient_back;
+                else
+                {
+                    float mix = ( offset - brush.stops[ index - 1 ] ) *
+                        gradient_reciprocal_deltas[ index - 1 ];
+                    paint = premultiplied( brush.colors[ index - 1 ] +
+                                           mix * gradient_deltas[ index - 1 ] );
+                }
+            }
+        }
+        rgba fore = amount * paint;
+        float mix_fore = operation & 1 ? back.a : 0.0f;
+        if ( operation & 2 )
+            mix_fore = 1.0f - mix_fore;
+        float mix_back = operation & 4 ? fore.a : 0.0f;
+        if ( operation & 8 )
+            mix_back = 1.0f - mix_back;
+        rgba blend = mix_fore * fore + mix_back * back;
+        blend.a = std::min( blend.a, 1.0f );
+        back = visibility * blend + complement * back;
+    }
+    return true;
+}
+
 // Paint one span with a pattern brush when the inverse transform is
 // axis-aligned.  The pattern's y coordinate, its y filter weights, and
 // its wrapped y indices are then the same for every pixel of the span,
@@ -2967,6 +3061,10 @@ void canvas::draw_span(
          inverse.b == 0.0f && inverse.c == 0.0f &&
          draw_pattern_span( from, to, y, coverage, visibility, brush ) )
         return;
+    if ( brush.type == paint_brush::radial && !brush.colors.empty() &&
+         gradient_prepared && inverse.b == 0.0f && inverse.c == 0.0f &&
+         draw_radial_span( from, to, y, coverage, visibility, brush ) )
+        return;
     bool const solid = brush.type == paint_brush::color &&
                        !brush.colors.empty();
     float complement = 1.0f - visibility;
@@ -3069,6 +3167,9 @@ void canvas::prepare_gradient(
     {
         gradient_initial = brush.start_radius;
         gradient_change = brush.end_radius - gradient_initial;
+        gradient_reciprocal_2a = 1.0f /
+            ( 2.0f * ( gradient_span -
+                       gradient_change * gradient_change ) );
     }
     gradient_prepared = true;
 }
