@@ -1193,6 +1193,8 @@ private:
                             paint_brush const & );
     bool draw_radial_span( int, int, int, float, float,
                            paint_brush const & );
+    bool draw_linear_span( int, int, int, float, float,
+                           paint_brush const & );
     void draw_opaque_span( int, int, int, float, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
@@ -2846,6 +2848,67 @@ bool canvas::draw_radial_span(
     return true;
 }
 
+// Paint one span with a linear gradient brush when the inverse transform
+// is axis-aligned.  The point's y coordinate and its share of the gradient
+// dot product are then the same for the whole span, so they are computed
+// once here instead of once per pixel.  Returns true when the span was
+// painted (every value matches paint_pixel's arithmetic exactly) and
+// false to fall back to the generic per-pixel path.  Kept out of line so
+// the hot paths of draw_span below keep their shape for other brushes.
+//
+bool canvas::draw_linear_span(
+    int from,
+    int to,
+    int y,
+    float coverage,
+    float visibility,
+    paint_brush const &brush )
+{
+    float point_y = inverse.d *
+        ( static_cast< float >( y ) + 0.5f ) + inverse.f;
+    float relative_y = point_y - brush.start.y;
+    float gradient_y = relative_y * gradient_line.y;
+    float reciprocal = gradient_reciprocal_span;
+    float amount = coverage * global_alpha;
+    float complement = 1.0f - visibility;
+    int operation = global_composite_operation;
+    for ( int x = from; x < to; ++x )
+    {
+        rgba &back = bitmap[ y * size_x + x ];
+        float point_x = inverse.a *
+            ( static_cast< float >( x ) + 0.5f ) + inverse.e;
+        float relative_x = point_x - brush.start.x;
+        float offset = ( relative_x * gradient_line.x + gradient_y ) *
+            reciprocal;
+        size_t index = static_cast< size_t >( std::upper_bound(
+            brush.stops.begin(), brush.stops.end(), offset ) -
+            brush.stops.begin() );
+        rgba paint;
+        if ( index == 0 )
+            paint = gradient_front;
+        else if ( index == brush.stops.size() )
+            paint = gradient_back;
+        else
+        {
+            float mix = ( offset - brush.stops[ index - 1 ] ) *
+                gradient_reciprocal_deltas[ index - 1 ];
+            paint = premultiplied( brush.colors[ index - 1 ] +
+                                   mix * gradient_deltas[ index - 1 ] );
+        }
+        rgba fore = amount * paint;
+        float mix_fore = operation & 1 ? back.a : 0.0f;
+        if ( operation & 2 )
+            mix_fore = 1.0f - mix_fore;
+        float mix_back = operation & 4 ? fore.a : 0.0f;
+        if ( operation & 8 )
+            mix_back = 1.0f - mix_back;
+        rgba blend = mix_fore * fore + mix_back * back;
+        blend.a = std::min( blend.a, 1.0f );
+        back = visibility * blend + complement * back;
+    }
+    return true;
+}
+
 // Paint one span with a pattern brush when the inverse transform is
 // axis-aligned.  The pattern's y coordinate, its y filter weights, and
 // its wrapped y indices are then the same for every pixel of the span,
@@ -3064,6 +3127,10 @@ void canvas::draw_span(
     if ( brush.type == paint_brush::radial && !brush.colors.empty() &&
          gradient_prepared && inverse.b == 0.0f && inverse.c == 0.0f &&
          draw_radial_span( from, to, y, coverage, visibility, brush ) )
+        return;
+    if ( brush.type == paint_brush::linear && !brush.colors.empty() &&
+         gradient_prepared && inverse.b == 0.0f && inverse.c == 0.0f &&
+         draw_linear_span( from, to, y, coverage, visibility, brush ) )
         return;
     bool const solid = brush.type == paint_brush::color &&
                        !brush.colors.empty();
