@@ -2248,6 +2248,40 @@ void canvas::lines_to_runs(
     {
         size_t beginning = ending;
         ending += lines.subpaths[ subpath ].count;
+        // Trivially accept subpaths fully inside the clip box: the
+        // four-edge clip below would copy every vertex through
+        // unchanged, so skip straight to scan conversion.  This only
+        // fires when no edge could clip anything; note the clip keeps
+        // vertices with to_side >= 0, i.e. inside or exactly on the
+        // boundary, and the scan converter clamps anyway, so the
+        // values reaching add_runs are exactly the same.
+        bool inside = true;
+        for ( size_t index = beginning; index < ending; ++index )
+        {
+            xy point = offset + lines.points[ index ];
+            if ( !( 0.0f <= point.x && point.x <= width &&
+                    0.0f <= point.y && point.y <= height ) )
+            {
+                inside = false;
+                break;
+            }
+        }
+        if ( inside )
+        {
+            size_t last = ending - beginning;
+            for ( size_t index = 0; index < last; ++index )
+            {
+                xy from = offset + lines.points[ beginning +
+                    ( index ? index : last ) - 1 ];
+                xy to = offset + lines.points[ beginning + index ];
+                add_runs( xy( std::min( std::max( from.x, 0.0f ), width ),
+                              std::min( std::max( from.y, 0.0f ),
+                                        height ) ),
+                          xy( std::min( std::max( to.x, 0.0f ), width ),
+                              std::min( std::max( to.y, 0.0f ), height ) ) );
+            }
+            continue;
+        }
         scratch.points.clear();
         for ( size_t index = beginning; index < ending; ++index )
             scratch.points.push_back( offset + lines.points[ index ] );
