@@ -1189,6 +1189,8 @@ private:
     void add_runs( xy, xy );
     void lines_to_runs( xy, int );
     void draw_span( int, int, int, float, float, paint_brush const & );
+    bool draw_pattern_span( int, int, int, float, float,
+                            paint_brush const & );
     void draw_opaque_span( int, int, int, float, paint_brush const & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
@@ -2750,6 +2752,123 @@ void canvas::draw_opaque_span(
     draw_span( from, to, y, coverage, 1.0f, brush );
 }
 
+// Paint one span with a pattern brush when the inverse transform is
+// axis-aligned.  The pattern's y coordinate, its y filter weights, and
+// its wrapped y indices are then the same for every pixel of the span,
+// so they are computed once here instead of once per pixel.  Returns
+// true when the span was painted (the taps are arithmetically identical
+// to paint_pixel's bicubic row taps) and false to fall back to the
+// generic per-pixel path.  Kept out of line so the hot paths of
+// draw_span below keep their shape for non-pattern brushes.
+//
+bool canvas::draw_pattern_span(
+    int from,
+    int to,
+    int y,
+    float coverage,
+    float visibility,
+    paint_brush const &brush )
+{
+    float width = static_cast< float >( brush.width );
+    float height = static_cast< float >( brush.height );
+    float scale_y = std::max( 1.0f, std::min(
+        fabsf( inverse.d ), height * 0.25f ) );
+    float reciprocal_y = 1.0f / scale_y;
+    float point_y = inverse.d *
+        ( static_cast< float >( y ) + 0.5f ) + inverse.f;
+    if ( ( brush.repetition & 1 ) &&
+         ( point_y < 0.0f || height <= point_y ) )
+        return false;
+    point_y -= 0.5f;
+    int top = static_cast< int >( ceilf( point_y - scale_y * 2.0f ) );
+    int bottom = static_cast< int >( ceilf( point_y + scale_y * 2.0f ) );
+    int taps = bottom - top;
+    if ( taps < 1 || 32 < taps )
+        return false;
+    float weights_y[ 32 ];
+    int wrapped_y[ 32 ];
+    for ( int tap = 0; tap < taps; ++tap )
+    {
+        int pattern_y = top + tap;
+        float y_dist = fabsf( reciprocal_y *
+            ( static_cast< float >( pattern_y ) - point_y ) );
+        weights_y[ tap ] = ( y_dist < 1.0f ?
+            (    1.5f * y_dist - 2.5f ) * y_dist * y_dist + 1.0f :
+            ( ( -0.5f * y_dist + 2.5f ) * y_dist - 4.0f ) *
+                y_dist + 2.0f );
+        int wrapped = pattern_y % brush.height;
+        if ( wrapped < 0 )
+            wrapped += brush.height;
+        if ( &brush == &image_brush )
+            wrapped = std::min( std::max( pattern_y, 0 ),
+                                brush.height - 1 );
+        wrapped_y[ tap ] = wrapped * brush.width;
+    }
+    float scale_x = std::max( 1.0f, std::min(
+        fabsf( inverse.a ), width * 0.25f ) );
+    float reciprocal_x = 1.0f / scale_x;
+    float amount = coverage * global_alpha;
+    float complement = 1.0f - visibility;
+    int operation = global_composite_operation;
+    for ( int x = from; x < to; ++x )
+    {
+        rgba &back = bitmap[ y * size_x + x ];
+        float point_x = inverse.a *
+            ( static_cast< float >( x ) + 0.5f ) + inverse.e;
+        rgba paint;
+        if ( ( brush.repetition & 2 ) &&
+             ( point_x < 0.0f || width <= point_x ) )
+            paint = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+        else
+        {
+            point_x -= 0.5f;
+            int left = static_cast< int >( ceilf(
+                point_x - scale_x * 2.0f ) );
+            int right = static_cast< int >( ceilf(
+                point_x + scale_x * 2.0f ) );
+            rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+            float total_weight = 0.0f;
+            for ( int tap = 0; tap < taps; ++tap )
+            {
+                float weight_y = weights_y[ tap ];
+                for ( int pattern_x = left;
+                      pattern_x < right; ++pattern_x )
+                {
+                    float x_dist = fabsf( reciprocal_x *
+                        ( static_cast< float >( pattern_x ) - point_x ) );
+                    float weight_x = ( x_dist < 1.0f ?
+                        ( 1.5f * x_dist - 2.5f ) * x_dist * x_dist + 1.0f :
+                        ( ( -0.5f * x_dist + 2.5f ) * x_dist - 4.0f ) *
+                            x_dist + 2.0f );
+                    int wrapped_x = pattern_x % brush.width;
+                    if ( wrapped_x < 0 )
+                        wrapped_x += brush.width;
+                    if ( &brush == &image_brush )
+                        wrapped_x = std::min( std::max( pattern_x, 0 ),
+                                              brush.width - 1 );
+                    float weight = weight_x * weight_y;
+                    size_t index = static_cast< size_t >(
+                        wrapped_y[ tap ] + wrapped_x );
+                    total_color += weight * brush.colors[ index ];
+                    total_weight += weight;
+                }
+            }
+            paint = ( 1.0f / total_weight ) * total_color;
+        }
+        rgba fore = amount * paint;
+        float mix_fore = operation & 1 ? back.a : 0.0f;
+        if ( operation & 2 )
+            mix_fore = 1.0f - mix_fore;
+        float mix_back = operation & 4 ? fore.a : 0.0f;
+        if ( operation & 8 )
+            mix_back = 1.0f - mix_back;
+        rgba blend = mix_fore * fore + mix_back * back;
+        blend.a = std::min( blend.a, 1.0f );
+        back = visibility * blend + complement * back;
+    }
+    return true;
+}
+
 void canvas::draw_span(
     int from,
     int to,
@@ -2762,6 +2881,10 @@ void canvas::draw_span(
     static float const threshold = 1.0f / 8160.0f;
     if ( !( ( coverage >= threshold || ~operation & 8 ) &&
             visibility >= threshold ) )
+        return;
+    if ( brush.type == paint_brush::pattern && !brush.colors.empty() &&
+         inverse.b == 0.0f && inverse.c == 0.0f &&
+         draw_pattern_span( from, to, y, coverage, visibility, brush ) )
         return;
     bool const solid = brush.type == paint_brush::color &&
                        !brush.colors.empty();
