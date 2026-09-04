@@ -25,17 +25,17 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
       - name: Enable MSVC
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: iShark5060/actions-msvc-dev-cmd@v1.0.2
 
       - name: "Run bench (split TU: lib -O2 C++03, harness C++11)"
         shell: bash
@@ -98,7 +98,7 @@ jobs:
                       "yes" if s["gated"] else "no"))
           EOF
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: bench-${{ matrix.os }}
           path: bench.json
