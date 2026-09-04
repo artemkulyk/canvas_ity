@@ -175,20 +175,21 @@ def geo_mean(values):
     return math.exp(sum(math.log(v) for v in values) / len(values))
 
 
-def render_pngs(binary, args, names, report_path):
-    # type: (Path, object, list, Path) -> str
-    # Render each workload with the B tree into --renders dir (or next
+def render_pngs(binary, args, report_path):
+    # type: (Path, object, Path) -> str
+    # Render every workload with the B tree into --renders dir (or next
     # to the JSON report when the flag is given without a value).
     if args.renders is None:
         return ""
-    dest = Path(args.renders) if args.renders else         report_path.parent / "renders"
+    dest = Path(args.renders) if args.renders else \
+        report_path.parent / "renders"
     dest.mkdir(parents=True, exist_ok=True)
     run([str(binary), "render", str(dest)])
     return str(dest)
 
 
 def single_report(args, names, collected_b, ours_id, ours_sha, dirty,
-                    comp_banner, lib_flags, harness_flags):
+                    comp_banner, lib_flags, harness_flags, renders):
     # type: (object, list, dict, str, str, str, str, list, list) -> int
     workloads = {}
     medians = []
@@ -221,8 +222,6 @@ def single_report(args, names, collected_b, ours_id, ours_sha, dirty,
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    renders = render_pngs(bin_b, args, names, out)
     report["renders"] = renders
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     rows = ["# Local bench (%s %s)" % (report["os"], report["arch"]), "",
@@ -388,8 +387,10 @@ def main():
         print("done %s" % name, flush=True)
 
     if args.single:
+        renders = render_pngs(bin_b, args, Path(args.out))
         return single_report(args, names, collected_b, ours_id, ours_sha,
-                             dirty, comp_banner, lib_flags, harness_flags)
+                             dirty, comp_banner, lib_flags, harness_flags,
+                             renders)
 
     workloads = {}
     gated_a, gated_b = [], []
@@ -460,8 +461,7 @@ def main():
     }
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    renders = render_pngs(bin_b, args, names, out)
+    renders = render_pngs(bin_b, args, out)
     report["renders"] = renders
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
