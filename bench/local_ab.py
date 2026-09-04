@@ -4,7 +4,8 @@
 Design (Phase A gate):
   - two snapshot include trees (base + ours), each with its own
     bench/local_impl.cpp TU compiled -std=c++03 -O2 -fno-exceptions
-    -fno-rtti; one shared harness TU (bench/local_bench.cpp, newer std).
+    -fno-rtti plus its own bench/local_bench.cpp harness TU (newer std),
+    so each binary always matches its header's class layout.
   - warmup pass on A then B, then --pairs interleaved pairs (A then B)
     PER WORKLOAD, each process reporting best-of---trials for that one
     workload on a fresh canvas per trial.
@@ -176,23 +177,32 @@ def main():
 
     harness_src = root / "bench" / "local_bench.cpp"
     impl_src = root / "bench" / "local_impl.cpp"
-    harness_o = build / "harness.o"
+    harness_a_o = build / "harness_a.o"
+    harness_b_o = build / "harness_b.o"
     impl_a_o = build / "impl_a.o"
     impl_b_o = build / "impl_b.o"
     bin_a = build / "bench_a"
     bin_b = build / "bench_b"
 
-    print("compile harness: %s" % comp_banner, flush=True)
+    # Each binary gets a harness TU compiled against its OWN tree.  The
+    # two headers may declare different class layouts (extra scratch
+    # members), so sharing one harness object would size stack canvases
+    # with the wrong header when the A tree is larger than the B tree.
+    print("compile harness A+B: %s" % comp_banner, flush=True)
+    run([compiler] + harness_flags + ["-I", str(tree_a), "-c",
+                                      str(harness_src), "-o", str(harness_a_o)])
     run([compiler] + harness_flags + ["-I", str(tree_b), "-c",
-                                      str(harness_src), "-o", str(harness_o)])
+                                      str(harness_src), "-o", str(harness_b_o)])
     print("compile lib A (-std=c++03)", flush=True)
     run([compiler] + lib_flags + ["-I", str(tree_a), "-c",
                                   str(impl_src), "-o", str(impl_a_o)])
     print("compile lib B (-std=c++03)", flush=True)
     run([compiler] + lib_flags + ["-I", str(tree_b), "-c",
                                   str(impl_src), "-o", str(impl_b_o)])
-    run([compiler, "-O2", "-o", str(bin_a), str(harness_o), str(impl_a_o)])
-    run([compiler, "-O2", "-o", str(bin_b), str(harness_o), str(impl_b_o)])
+    run([compiler, "-O2", "-o", str(bin_a),
+         str(harness_a_o), str(impl_a_o)])
+    run([compiler, "-O2", "-o", str(bin_b),
+         str(harness_b_o), str(impl_b_o)])
 
     names = [w for w in WORKLOADS
              if not args.workloads or w in args.workloads.split(",")]
