@@ -2807,6 +2807,7 @@ bool canvas::draw_pattern_span(
     float scale_x = std::max( 1.0f, std::min(
         fabsf( inverse.a ), width * 0.25f ) );
     float reciprocal_x = 1.0f / scale_x;
+    bool const clamped = &brush == &image_brush;
     float amount = coverage * global_alpha;
     float complement = 1.0f - visibility;
     int operation = global_composite_operation;
@@ -2826,34 +2827,55 @@ bool canvas::draw_pattern_span(
                 point_x - scale_x * 2.0f ) );
             int right = static_cast< int >( ceilf(
                 point_x + scale_x * 2.0f ) );
-            rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
-            float total_weight = 0.0f;
-            for ( int tap = 0; tap < taps; ++tap )
+            if ( 32 < right - left )
+                paint = paint_pixel(
+                    xy( static_cast< float >( x ) + 0.5f,
+                        static_cast< float >( y ) + 0.5f ), brush );
+            else
             {
-                float weight_y = weights_y[ tap ];
-                for ( int pattern_x = left;
-                      pattern_x < right; ++pattern_x )
+                // A column's bicubic weight and wrapped index do not
+                // depend on the row, so evaluate them once per column
+                // instead of once per tapped pixel, and walk the wrap
+                // with an incrementing counter instead of a division.
+                float weights_x[ 32 ];
+                int wrapped_x[ 32 ];
+                int wrapped = left % brush.width;
+                if ( wrapped < 0 )
+                    wrapped += brush.width;
+                for ( int column = left; column < right; ++column )
                 {
                     float x_dist = fabsf( reciprocal_x *
-                        ( static_cast< float >( pattern_x ) - point_x ) );
-                    float weight_x = ( x_dist < 1.0f ?
+                        ( static_cast< float >( column ) - point_x ) );
+                    weights_x[ column - left ] = ( x_dist < 1.0f ?
                         ( 1.5f * x_dist - 2.5f ) * x_dist * x_dist + 1.0f :
                         ( ( -0.5f * x_dist + 2.5f ) * x_dist - 4.0f ) *
                             x_dist + 2.0f );
-                    int wrapped_x = pattern_x % brush.width;
-                    if ( wrapped_x < 0 )
-                        wrapped_x += brush.width;
-                    if ( &brush == &image_brush )
-                        wrapped_x = std::min( std::max( pattern_x, 0 ),
-                                              brush.width - 1 );
-                    float weight = weight_x * weight_y;
-                    size_t index = static_cast< size_t >(
-                        wrapped_y[ tap ] + wrapped_x );
-                    total_color += weight * brush.colors[ index ];
-                    total_weight += weight;
+                    if ( clamped )
+                        wrapped = std::min( std::max( column, 0 ),
+                                            brush.width - 1 );
+                    else if ( wrapped == brush.width )
+                        wrapped = 0;
+                    wrapped_x[ column - left ] = wrapped;
+                    if ( !clamped )
+                        ++wrapped;
                 }
+                rgba total_color = rgba( 0.0f, 0.0f, 0.0f, 0.0f );
+                float total_weight = 0.0f;
+                for ( int tap = 0; tap < taps; ++tap )
+                {
+                    float weight_y = weights_y[ tap ];
+                    for ( int column = left; column < right; ++column )
+                    {
+                        float weight = weights_x[ column - left ] *
+                            weight_y;
+                        size_t index = static_cast< size_t >(
+                            wrapped_y[ tap ] + wrapped_x[ column - left ] );
+                        total_color += weight * brush.colors[ index ];
+                        total_weight += weight;
+                    }
+                }
+                paint = ( 1.0f / total_weight ) * total_color;
             }
-            paint = ( 1.0f / total_weight ) * total_color;
         }
         rgba fore = amount * paint;
         float mix_fore = operation & 1 ? back.a : 0.0f;
