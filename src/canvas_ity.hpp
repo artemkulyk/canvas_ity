@@ -3545,10 +3545,10 @@ canvas::canvas(
       stroke_brush(),
       image_brush(),
       clipped( false ),
-      gradient_prepared( false ),
       face(),
       bitmap( new rgba[ width * height ] ),
-      saves( 0 )
+      saves( 0 ),
+      gradient_prepared( false )
 {
     affine_matrix identity = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f };
     forward = identity;
