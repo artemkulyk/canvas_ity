@@ -2827,11 +2827,25 @@ void canvas::draw_opaque_span(
     float coverage,
     paint_brush const &brush )
 {
-    if ( to - from >= 16 && coverage == 1.0f )
+    // Fill through wider stores: pairs of lanes hold the same
+    // value, so the framebuffer ends up exactly as with one-by-one
+    // copies, at half the stores.  Kept portable and aliasing-safe
+    // (two struct copies, which the compiler may fuse further);
+    // the tail handles odd lengths.
+    if ( coverage == 1.0f )
     {
         rgba fore = brush.colors.front();
-        for ( int x = from; x < to; ++x )
-            bitmap[ y * size_x + x ] = fore;
+        rgba *row = &bitmap[ y * size_x + from ];
+        int count = to - from;
+        int pairs = count >> 1;
+        for ( int pair = 0; pair < pairs; ++pair )
+        {
+            row[ 0 ] = fore;
+            row[ 1 ] = fore;
+            row += 2;
+        }
+        if ( count & 1 )
+            row[ 0 ] = fore;
         return;
     }
     draw_span( from, to, y, coverage, 1.0f, brush );
