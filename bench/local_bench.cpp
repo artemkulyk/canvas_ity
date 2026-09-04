@@ -93,7 +93,7 @@ struct entry { char const *name; workload call; int width; int height; };
 
 static void path_construction( canvas &that, int, int )
 {
-    for ( int repeat = 0; repeat < 1000; ++repeat )
+    for ( int repeat = 0; repeat < 1200; ++repeat )
     {
         that.begin_path();
         for ( int subpath = 0; subpath < 50; ++subpath )
@@ -386,10 +386,14 @@ int main( int argc, char **argv )
         entry const &item = tests[ index ];
         if ( filter && strcmp( filter, item.name ) )
             continue;
-        rng_state = 0x243f6a8885a308d3ULL + index * 0x9e3779b97f4a7c15ULL;
+        // Reseed before EVERY trial so best-of-N compares identical
+        // work; otherwise trial-to-trial RNG drift (e.g. rotation-heavy
+        // seeds in complex_scene) masquerades as machine noise.
         double best = 1.0e100;
         for ( int trial = 0; trial < trials; ++trial )
         {
+            rng_state =
+                0x243f6a8885a308d3ULL + index * 0x9e3779b97f4a7c15ULL;
             canvas that( item.width, item.height );
             double start = get_seconds();
             item.call( that, item.width, item.height );

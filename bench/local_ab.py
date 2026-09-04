@@ -140,7 +140,7 @@ def main():
                         help="directory holding canvas_ity.hpp for B tree "
                              "(default: snapshot of working src/)")
     parser.add_argument("--pairs", type=int, default=7)
-    parser.add_argument("--trials", type=int, default=7)
+    parser.add_argument("--trials", type=int, default=9)
     parser.add_argument("--workloads", default="",
                         help="comma-separated subset (default: all)")
     parser.add_argument("--out", default="/tmp/ab.json")
@@ -203,20 +203,25 @@ def main():
         # type: (Path, str) -> float
         return parse_time(run([str(binary), str(args.trials), workload]))
 
-    print("warmup A (all workloads)", flush=True)
-    for name in names:
-        once(bin_a, name)
-    print("warmup B (all workloads)", flush=True)
-    for name in names:
-        once(bin_b, name)
+    for lap in (1, 2):
+        print("warmup A (all workloads, lap %d/2)" % lap, flush=True)
+        for name in names:
+            once(bin_a, name)
+        print("warmup B (all workloads, lap %d/2)" % lap, flush=True)
+        for name in names:
+            once(bin_b, name)
 
+    # Per-workload pair blocks: all pairs for one workload run back to
+    # back (A,B interleaved), so one workload's sample set spans seconds,
+    # not the minutes a whole-suite sweep would take.  Slow thermal drift
+    # then cannot inflate (max-min)/median spreads.
     collected_a = {name: [] for name in names}  # type: dict
     collected_b = {name: [] for name in names}  # type: dict
-    for pair in range(args.pairs):
-        for name in names:
+    for name in names:
+        for pair in range(args.pairs):
             collected_a[name].append(once(bin_a, name))
             collected_b[name].append(once(bin_b, name))
-        print("pair %d/%d" % (pair + 1, args.pairs), flush=True)
+        print("done %s" % name, flush=True)
 
     workloads = {}
     gated_a, gated_b = [], []
@@ -249,6 +254,8 @@ def main():
                       or delta > 3.0 * max(sa["spread"], sb["spread"]) * 100.0):
             vetoes.append(name)
         workloads[name] = {
+            "samples_a": [round(v, 3) for v in collected_a[name]],
+            "samples_b": [round(v, 3) for v in collected_b[name]],
             "median_a": base, "median_b": ours,
             "delta_pct": round(delta, 2),
             "min_a": sa["min_ms"], "max_a": sa["max_ms"],
