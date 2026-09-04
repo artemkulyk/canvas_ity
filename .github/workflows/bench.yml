@@ -50,14 +50,16 @@ jobs:
           # runs with bench/build as its cwd).
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             python bench/local_ab.py --pairs 7 --trials 9 \
-              --base "${BASE_REF:-8be29cb}" --out bench.json || true
+              --base "${BASE_REF:-8be29cb}" --out bench.json \
+              --renders renders || true
           elif [ "${REF}" != "refs/heads/main" ] || [ "${EVENT_NAME}" = "pull_request" ]; then
             git fetch origin main --no-tags --prune
             python bench/local_ab.py --pairs 7 --trials 9 \
-              --base origin/main --out bench.json || true
+              --base origin/main --out bench.json \
+              --renders renders || true
           else
             python bench/local_ab.py --pairs 7 --trials 9 \
-              --single --out bench.json
+              --single --out bench.json --renders renders
           fi
           # ASCII-only report: safe for the Windows cp1252 console and
           # for $GITHUB_STEP_SUMMARY on every runner.
@@ -69,6 +71,8 @@ jobs:
           print("")
           print("- lib: `%s`  harness: `%s`" % (
               report["lib_flags"], report["harness_flags"]))
+          print("- workload renders: artifact bench-renders-%s" % (
+              "${{ matrix.os }}"))
           if report.get("mode") == "local_ab":
               print("- base `%s` vs ours `%s`" % (
                   report["base_id"], report["ours_sha"]))
@@ -102,3 +106,9 @@ jobs:
         with:
           name: bench-${{ matrix.os }}
           path: bench.json
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: bench-renders-${{ matrix.os }}
+          path: renders/*.png
+          if-no-files-found: error

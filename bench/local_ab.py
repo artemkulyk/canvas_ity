@@ -68,14 +68,59 @@ def run(cmd, cwd=None):
 
 def banner(compiler):
     # type: (str) -> str
+    # NB: bare cl exits nonzero after printing its banner, so tolerate
+    # the exit code there.
     try:
-        out = run([compiler, "--version"])
-    except (OSError, RuntimeError):
+        if compiler == "cl":
+            proc = subprocess.run(
+                [compiler], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True)
+            out = proc.stdout
+        else:
+            out = run([compiler, "--version"])
+    except OSError:
         return compiler
     for line in out.splitlines():
         if line.strip():
             return line.strip()
     return compiler
+
+
+def compiler_label(banner_text):
+    # type: (str) -> str
+    # Turn raw first lines like
+    #   "c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0" or
+    #   "Apple clang version 21.0.0 (clang-2100.1.1.101)" or
+    #   "Microsoft (R) C/C++ Optimizing Compiler Version 19.44 ..."
+    # into short "GCC 13.3.0 (Ubuntu 24.04)" / "Apple Clang 21.0.0" /
+    # "MSVC 19.44" labels for reports.
+    text = (banner_text or "").strip()
+    match = re.match(r"Apple clang version (\d+(?:\.\d+)+)", text)
+    if match:
+        return "Apple Clang " + match.group(1)
+    match = re.search(r"Optimizing Compiler Version (\d+\.\d+)", text)
+    if match:
+        return "MSVC " + match.group(1)
+    match = re.match(
+        r"(?:c\+\+|g\+\+|gcc|clang)(?: version)?(?: \(([^)]*)\))?"
+        r" (\d+(?:\.\d+)+)", text)
+    if match:
+        distro, version = match.group(1) or "", match.group(2)
+        family = "Clang" if text.startswith("clang") else "GCC"
+        suffix = ""
+        name = re.match(r"([A-Za-z]+)", distro)
+        rel = re.search(r"~(\d+\.\d+)", distro)
+        if name:
+            suffix = " (" + name.group(1)
+            suffix += " " + rel.group(1) if rel else ""
+            suffix += ")"
+        return family + " " + version + suffix
+    return text.splitlines()[0][:64] if text else "unknown compiler"
+
+
+def short_sha(value):
+    # type: (str) -> str
+    return value[:12] if value else value
 
 
 def median(values):
@@ -130,6 +175,18 @@ def geo_mean(values):
     return math.exp(sum(math.log(v) for v in values) / len(values))
 
 
+def render_pngs(binary, args, names, report_path):
+    # type: (Path, object, list, Path) -> str
+    # Render each workload with the B tree into --renders dir (or next
+    # to the JSON report when the flag is given without a value).
+    if args.renders is None:
+        return ""
+    dest = Path(args.renders) if args.renders else         report_path.parent / "renders"
+    dest.mkdir(parents=True, exist_ok=True)
+    run([str(binary), "render", str(dest)])
+    return str(dest)
+
+
 def single_report(args, names, collected_b, ours_id, ours_sha, dirty,
                     comp_banner, lib_flags, harness_flags):
     # type: (object, list, dict, str, str, str, str, list, list) -> int
@@ -151,7 +208,8 @@ def single_report(args, names, collected_b, ours_id, ours_sha, dirty,
     report = {
         "mode": "local_single",
         "os": platform.system(), "arch": platform.machine(),
-        "compiler": comp_banner,
+        "compiler": compiler_label(comp_banner),
+        "compiler_raw": comp_banner,
         "lib_flags": " ".join(lib_flags),
         "harness_flags": " ".join(harness_flags),
         "ours_id": ours_id, "ours_sha": ours_sha,
@@ -164,14 +222,19 @@ def single_report(args, names, collected_b, ours_id, ours_sha, dirty,
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    renders = render_pngs(bin_b, args, names, out)
+    report["renders"] = renders
+    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     rows = ["# Local bench (%s %s)" % (report["os"], report["arch"]), "",
-            "- compiler: `%s`" % comp_banner,
+            "- compiler: `%s`" % compiler_label(comp_banner),
             "- lib: `%s`  harness: `%s`" % (report["lib_flags"],
                                             report["harness_flags"]),
-            "- ours: `%s%s`" % (ours_sha, " DIRTY" if dirty else ""),
+            "- ours: `%s%s`" % (short_sha(ours_sha), " DIRTY" if dirty else ""),
             "- %d runs per workload after warmup, best-of-%d" % (
                 args.pairs, args.trials),
             "- gated geo: %.3f ms" % geo, "",
+            "- renders (one PNG per workload): %s" % (
+                renders if renders else "not requested"), "",
             "| workload | median ms | spread | gated |",
             "|---|---:|---:|---|"]
     for name in names:
@@ -203,6 +266,9 @@ def main():
     parser.add_argument("--single", action="store_true",
                         help="report the B tree alone (median/spread/geo, "
                              "no A/B deltas); used for main-push reports")
+    parser.add_argument("--renders", default="",
+                        help="directory to write one PNG per workload "
+                             "(rendered with the B tree)")
     args = parser.parse_args()
 
     root = repo_root()
@@ -277,7 +343,7 @@ def main():
     # two headers may declare different class layouts (extra scratch
     # members), so sharing one harness object would size stack canvases
     # with the wrong header when the A tree is larger than the B tree.
-    print("compile harness A+B: %s" % comp_banner, flush=True)
+    print("compile harness A+B: %s" % compiler_label(comp_banner), flush=True)
     if not args.single:
         compile_one(harness_src, tree_a, harness_a_o, harness_flags)
     compile_one(harness_src, tree_b, harness_b_o, harness_flags)
@@ -375,7 +441,8 @@ def main():
     report = {
         "mode": "local_ab",
         "os": platform.system(), "arch": platform.machine(),
-        "compiler": comp_banner,
+        "compiler": compiler_label(comp_banner),
+        "compiler_raw": comp_banner,
         "lib_flags": " ".join(lib_flags),
         "harness_flags": " ".join(harness_flags),
         "pinning": "none (Darwin has no core pinning; "
@@ -394,15 +461,21 @@ def main():
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    renders = render_pngs(bin_b, args, names, out)
+    report["renders"] = renders
+    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     rows = ["# Local A/B (%s %s)" % (report["os"], report["arch"]), "",
-            "- compiler: `%s`" % comp_banner,
+            "- compiler: `%s`" % compiler_label(comp_banner),
             "- lib: `%s`  harness: `%s`" % (report["lib_flags"],
                                             report["harness_flags"]),
             "- base: `%s`  ours: `%s%s`" % (
-                base_id, ours_sha, " DIRTY" if dirty else ""),
+                short_sha(base_id), short_sha(ours_sha),
+                " DIRTY" if dirty else ""),
             "- %d interleaved pairs per workload after warmup, best-of-%d" % (
                 args.pairs, args.trials),
+            "- renders (one PNG per workload): %s" % (
+                renders if renders else "not requested"),
             "- gated geo: **%+.1f%%** (base %.3f ms -> ours %.3f ms)" % (
                 geo_delta, geo_a, geo_b),
             "- verdict: **%s** wins=%s vetoes=%s unstable=%s demoted=%s" % (
