@@ -274,9 +274,12 @@ int main()
     ligatures, text shaping, or text layout.  If you require any of those,
     consider using another library to provide those and feed the results to
     this library as either placed glyphs or raw paths.
-- _TRUETYPE FONT PARSING IS NOT SECURE!_ It does some basic validity checking,
-    but should only be used with known-good or sanitized fonts.
-- Parameter checking does not test for non-finite floating-point values.
+- TrueType font parsing validates offsets, lengths, and basic table
+    structure before use, but it is still basic convenience parsing, not
+    a hardened font loader; prefer known-good or sanitized fonts.
+- Parameter checking does not test for non-finite floating-point values,
+    except that absurd shadow blur radii are ignored because working
+    memory grows with the radius.
 - Rendering is single-threaded, not explicitly vectorized, and not GPU-
     accelerated.  It also copies data to avoid ownership issues.  If you
     need the speed, you are better off using a more fully-featured library.

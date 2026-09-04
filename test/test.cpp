@@ -1740,6 +1740,65 @@ void measure_text( canvas &that, float width, float height )
     that.fill_text( "s", place, 0.2f * height );
 }
 
+void malformed_font( canvas &that, float width, float height )
+{
+    that.set_color( fill_style, 0.0f, 0.0f, 0.0f, 1.0f );
+    vector< unsigned char > negative = font_a;
+    negative[ 20 ] = 0xff;
+    negative[ 21 ] = 0xff;
+    negative[ 22 ] = 0xff;
+    negative[ 23 ] = 0xf8;
+    if ( that.set_font( &negative[ 0 ],
+                        static_cast< int >( negative.size() ),
+                        0.2f * height ) )
+        that.fill_text( "D", 0.1f * width, 0.5f * height );
+    vector< unsigned char > overflow = font_a;
+    overflow[ 20 ] = 0x70;
+    overflow[ 21 ] = 0x00;
+    overflow[ 22 ] = 0x00;
+    overflow[ 23 ] = 0x00;
+    overflow[ 24 ] = 0x70;
+    overflow[ 25 ] = 0x00;
+    overflow[ 26 ] = 0x00;
+    overflow[ 27 ] = 0x00;
+    if ( that.set_font( &overflow[ 0 ],
+                        static_cast< int >( overflow.size() ),
+                        0.2f * height ) )
+        that.fill_text( "D", 0.3f * width, 0.5f * height );
+    vector< unsigned char > no_units = font_a;
+    for ( size_t index = 0; index + 28 < font_a.size(); ++index )
+        if ( font_a[ index ] == 'h' && font_a[ index + 1 ] == 'e' &&
+             font_a[ index + 2 ] == 'a' && font_a[ index + 3 ] == 'd' )
+        {
+            size_t table = ( font_a[ index + 8 ] << 24 |
+                             font_a[ index + 9 ] << 16 |
+                             font_a[ index + 10 ] << 8 |
+                             font_a[ index + 11 ] ) + 18;
+            if ( table + 1 < no_units.size() )
+                no_units[ table ] = no_units[ table + 1 ] = 0;
+            break;
+        }
+    if ( that.set_font( &no_units[ 0 ],
+                        static_cast< int >( no_units.size() ),
+                        0.2f * height ) )
+        that.fill_text( "D", 0.5f * width, 0.5f * height );
+    that.set_font( &font_a[ 0 ], static_cast< int >( font_a.size() ),
+                   0.2f * height );
+    that.fill_text( "D", 0.8f * width, 0.5f * height );
+}
+
+void extreme_shadow( canvas &that, float width, float height )
+{
+    that.set_color( fill_style, 0.0f, 0.0f, 0.0f, 1.0f );
+    that.set_shadow_color( 0.0f, 0.0f, 0.0f, 1.0f );
+    that.set_shadow_blur( 1.0e30f );
+    that.fill_rectangle( 0.1f * width, 0.1f * height,
+                         0.3f * width, 0.3f * height );
+    that.set_shadow_blur( 4.0f );
+    that.fill_rectangle( 0.6f * width, 0.6f * height,
+                         0.3f * width, 0.3f * height );
+}
+
 void draw_image( canvas &that, float width, float height )
 {
     unsigned char checker[ 1024 ];
@@ -2247,6 +2306,8 @@ struct test
     { 0x70e3232d, 256, 256, fill_text, "fill_text" },
     { 0xed6477c8, 256, 256, stroke_text, "stroke_text" },
     { 0x32d1ee3b, 256, 256, measure_text, "measure_text" },
+    { 0x905992e4, 256, 256, malformed_font, "malformed_font" },
+    { 0xe46d1204, 256, 256, extreme_shadow, "extreme_shadow" },
     { 0x78cb460c, 256, 256, draw_image, "draw_image" },
     { 0xb530077b, 256, 256, draw_image_matted, "draw_image_matted" },
     { 0xaf04e7a2, 256, 256, get_image_data, "get_image_data" },

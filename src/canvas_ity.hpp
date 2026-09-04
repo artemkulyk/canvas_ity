@@ -105,9 +105,12 @@
 //     ligatures, text shaping, or text layout.  If you require any of those,
 //     consider using another library to provide those and feed the results
 //     to this library as either placed glyphs or raw paths.
-// - TRUETYPE FONT PARSING IS NOT SECURE!  It does some basic validity
-//     checking, but should only be used with known-good or sanitized fonts.
-// - Parameter checking does not test for non-finite floating-point values.
+// - TrueType font parsing validates offsets, lengths, and basic table
+//     structure before use, but it is still basic convenience parsing, not
+//     a hardened font loader; prefer known-good or sanitized fonts.
+// - Parameter checking does not test for non-finite floating-point values,
+//     except that absurd shadow blur radii are ignored because working
+//     memory grows with the radius.
 // - Rendering is single-threaded, not explicitly vectorized, and not GPU-
 //     accelerated.  It also copies data to avoid ownership issues.  If you
 //     need the speed, you are better off using a more fully-featured library.
@@ -944,8 +947,8 @@ public:
     /// change or destroy after this call.  As an optimization, calling this
     /// with either a null pointer or zero for the number of bytes will allow
     /// for changing the size of the previous font without recopying from
-    /// the file.  Note that the font parsing is not meant to be secure;
-    /// only use this with trusted TTF files!
+    /// the file.  The parsing is basic convenience parsing, not a hardened
+    /// font loader; prefer known-good or sanitized TTF files.
     ///
     /// @param font   pointer to the contents of a TrueType font (TTF) file
     /// @param bytes  number of bytes in the font file
@@ -1323,22 +1326,38 @@ static rgba const clamped( rgba that ) {
                  std::min( std::max( that.b, 0.0f ), 1.0f ),
                  std::min( std::max( that.a, 0.0f ), 1.0f ) ); }
 
-// Helpers for TTF file parsing
-static int unsigned_8( std::vector< unsigned char > &data, int index ) {
+// Helpers for TTF file parsing.  Out-of-range reads return zero, and
+// multibyte fields are assembled from unsigned bytes, so malformed data
+// degrades to zero offsets/counts rather than reading outside the buffer
+// or invoking signed-integer overflow.
+//
+static int unsigned_8( std::vector< unsigned char > const &data, int index ) {
+    if ( index < 0 || static_cast< size_t >( index ) + 1 > data.size() )
+        return 0;
     return data[ static_cast< size_t >( index ) ]; }
-static int signed_8( std::vector< unsigned char > &data, int index ) {
+static int signed_8( std::vector< unsigned char > const &data, int index ) {
+    int value = unsigned_8( data, index );
+    return value < 128 ? value : value - 256; }
+static int unsigned_16( std::vector< unsigned char > const &data, int index ) {
+    if ( index < 0 || static_cast< size_t >( index ) + 2 > data.size() )
+        return 0;
     size_t place = static_cast< size_t >( index );
-    return static_cast< signed char >( data[ place ] ); }
-static int unsigned_16( std::vector< unsigned char > &data, int index ) {
+    return static_cast< int >( data[ place ] ) << 8 |
+        static_cast< int >( data[ place + 1 ] ); }
+static int signed_16( std::vector< unsigned char > const &data, int index ) {
+    int value = unsigned_16( data, index );
+    return value < 32768 ? value : value - 65536; }
+static int signed_32( std::vector< unsigned char > const &data, int index ) {
+    if ( index < 0 || static_cast< size_t >( index ) + 4 > data.size() )
+        return 0;
     size_t place = static_cast< size_t >( index );
-    return data[ place ] << 8 | data[ place + 1 ]; }
-static int signed_16( std::vector< unsigned char > &data, int index ) {
-    size_t place = static_cast< size_t >( index );
-    return static_cast< short >( data[ place ] << 8 | data[ place + 1 ] ); }
-static int signed_32( std::vector< unsigned char > &data, int index ) {
-    size_t place = static_cast< size_t >( index );
-    return ( data[ place + 0 ] << 24 | data[ place + 1 ] << 16 |
-             data[ place + 2 ] <<  8 | data[ place + 3 ] <<  0 ); }
+    unsigned long value =
+        ( static_cast< unsigned long >( data[ place + 0 ] ) << 24 ) |
+        ( static_cast< unsigned long >( data[ place + 1 ] ) << 16 ) |
+        ( static_cast< unsigned long >( data[ place + 2 ] ) << 8 ) |
+        static_cast< unsigned long >( data[ place + 3 ] );
+    return value < 0x80000000ul ? static_cast< int >( value ) :
+        static_cast< int >( value - 0x80000000ul ) - 0x40000000 - 0x40000000; }
 
 // Tessellate (at low-level) a cubic Bezier curve and add it to the polyline
 // data.  This recursively splits the curve until two criteria are met
@@ -2575,8 +2594,13 @@ void canvas::render_shadow(
                                      shadow_offset_y == 0.0f ) )
         return;
     float sigma_squared = 0.25f * shadow_blur * shadow_blur;
-    size_t radius = static_cast< size_t >(
-        0.5f * sqrtf( 4.0f * sigma_squared + 1.0f ) - 0.5f );
+    float wanted = 0.5f * sqrtf( 4.0f * sigma_squared + 1.0f ) - 0.5f;
+    // Absurd blur values are meaningless, and working memory grows with
+    // the radius.  Values through this limit stay within the documented
+    // canvas size bounds below.
+    if ( !( wanted < 32768.0f ) )
+        return;
+    size_t radius = static_cast< size_t >( wanted );
     int border = 3 * ( static_cast< int >( radius ) + 1 );
     xy offset = xy( static_cast< float >( border ) + shadow_offset_x,
                     static_cast< float >( border ) + shadow_offset_y );
@@ -4085,11 +4109,15 @@ bool canvas::set_font(
         face.os_2 = 0;
         if ( bytes < 6 )
             return false;
-        int version = ( font[ 0 ] << 24 | font[ 1 ] << 16 |
-                        font[ 2 ] <<  8 | font[ 3 ] <<  0 );
-        int tables = font[ 4 ] << 8 | font[ 5 ];
-        if ( ( version != 0x00010000 && version != 0x74727565 ) ||
-             bytes < tables * 16 + 12 )
+        unsigned long version =
+            ( static_cast< unsigned long >( font[ 0 ] ) << 24 ) |
+            ( static_cast< unsigned long >( font[ 1 ] ) << 16 ) |
+            ( static_cast< unsigned long >( font[ 2 ] ) << 8 ) |
+            static_cast< unsigned long >( font[ 3 ] );
+        int tables = ( static_cast< int >( font[ 4 ] ) << 8 ) |
+            static_cast< int >( font[ 5 ] );
+        if ( ( version != 0x00010000ul && version != 0x74727565ul ) ||
+             tables < 0 || bytes < tables * 16 + 12 )
             return false;
         face.data.insert( face.data.end(), font, font + tables * 16 + 12 );
         for ( int index = 0; index < tables; ++index )
@@ -4097,7 +4125,8 @@ bool canvas::set_font(
             int tag = signed_32( face.data, index * 16 + 12 );
             int offset = signed_32( face.data, index * 16 + 20 );
             int span = signed_32( face.data, index * 16 + 24 );
-            if ( bytes < offset + span )
+            if ( offset < 0 || span < 0 || offset > bytes ||
+                 span > bytes - offset )
             {
                 face.data.clear();
                 return false;
@@ -4134,6 +4163,11 @@ bool canvas::set_font(
     if ( face.data.empty() )
         return false;
     int units_per_em = unsigned_16( face.data, face.head + 18 );
+    if ( units_per_em <= 0 )
+    {
+        face.data.clear();
+        return false;
+    }
     face.scale = size / static_cast< float >( units_per_em );
     return true;
 }
