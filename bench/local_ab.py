@@ -130,6 +130,60 @@ def geo_mean(values):
     return math.exp(sum(math.log(v) for v in values) / len(values))
 
 
+def single_report(args, names, collected_b, ours_id, ours_sha, dirty,
+                    comp_banner, lib_flags, harness_flags):
+    # type: (object, list, dict, str, str, str, str, list, list) -> int
+    workloads = {}
+    medians = []
+    for name in names:
+        sb = summarize(collected_b[name])
+        workloads[name] = {
+            "samples": [round(v, 3) for v in collected_b[name]],
+            "median_ms": sb["median_ms"],
+            "min_ms": sb["min_ms"], "max_ms": sb["max_ms"],
+            "spread": sb["spread"],
+            "gated": sb["median_ms"] >= GATE_MS,
+            "stable": sb["spread"] <= SPREAD_LIMIT,
+        }
+        if sb["median_ms"] >= GATE_MS:
+            medians.append(sb["median_ms"])
+    geo = geo_mean(medians)
+    report = {
+        "mode": "local_single",
+        "os": platform.system(), "arch": platform.machine(),
+        "compiler": comp_banner,
+        "lib_flags": " ".join(lib_flags),
+        "harness_flags": " ".join(harness_flags),
+        "ours_id": ours_id, "ours_sha": ours_sha,
+        "ours_dirty": dirty,
+        "pairs": args.pairs, "trials": args.trials,
+        "gate_ms": GATE_MS, "spread_limit": SPREAD_LIMIT,
+        "geo_ms": round(geo, 3),
+        "workloads": workloads,
+    }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    rows = ["# Local bench (%s %s)" % (report["os"], report["arch"]), "",
+            "- compiler: `%s`" % comp_banner,
+            "- lib: `%s`  harness: `%s`" % (report["lib_flags"],
+                                            report["harness_flags"]),
+            "- ours: `%s%s`" % (ours_sha, " DIRTY" if dirty else ""),
+            "- %d runs per workload after warmup, best-of-%d" % (
+                args.pairs, args.trials),
+            "- gated geo: %.3f ms" % geo, "",
+            "| workload | median ms | spread | gated |",
+            "|---|---:|---:|---|"]
+    for name in names:
+        s = workloads[name]
+        rows.append(
+            "| {n} | {m:.3f} | {sp:.1%} | {g} |".format(
+                n=name, m=s["median_ms"], sp=s["spread"],
+                g="yes" if s["gated"] else "no"))
+    print("\n".join(rows) + "\n", flush=True)
+    return 0
+
+
 def main():
     # type: () -> int
     parser = argparse.ArgumentParser(description=__doc__)
@@ -146,6 +200,9 @@ def main():
                         help="comma-separated subset (default: all)")
     parser.add_argument("--out", default="/tmp/ab.json")
     parser.add_argument("--build-dir", default="bench/build/local_ab")
+    parser.add_argument("--single", action="store_true",
+                        help="report the B tree alone (median/spread/geo, "
+                             "no A/B deltas); used for main-push reports")
     args = parser.parse_args()
 
     root = repo_root()
@@ -154,10 +211,12 @@ def main():
     tree_a = build / "tree_a"
     tree_b = build / "tree_b"
 
-    base_id = snapshot_tree(
-        root, tree_a,
-        src_dir=Path(args.base_dir) if args.base_dir else None,
-        ref=None if args.base_dir else args.base)
+    base_id = ""
+    if not args.single:
+        base_id = snapshot_tree(
+            root, tree_a,
+            src_dir=Path(args.base_dir) if args.base_dir else None,
+            ref=None if args.base_dir else args.base)
     if args.ours_dir:
         ours_id = snapshot_tree(
             root, tree_b, src_dir=Path(args.ours_dir))
@@ -170,39 +229,66 @@ def main():
     except RuntimeError:
         ours_sha, dirty = "unknown", ""
 
-    compiler = "c++"
-    lib_flags = ["-O2", "-std=c++03", "-fno-exceptions", "-fno-rtti"]
-    harness_flags = ["-O2", "-std=c++11"]
+    # All paths below are absolute, so every compile and run works no
+    # matter what the process working directory is (MSVC on CI runs with
+    # bench/build as its cwd).
+    if os.name == "nt":
+        compiler = "cl"
+        lib_flags = ["/O2", "/EHsc"]
+        harness_flags = ["/O2", "/EHsc"]
+        obj_ext = ".obj"
+        bin_ext = ".exe"
+    else:
+        compiler = "c++"
+        lib_flags = ["-O2", "-std=c++03", "-fno-exceptions", "-fno-rtti"]
+        harness_flags = ["-O2", "-std=c++11"]
+        obj_ext = ".o"
+        bin_ext = ""
     comp_banner = banner(compiler)
+
+    def compile_one(src, inc, obj, flags):
+        # type: (Path, Path, Path, list) -> None
+        src, inc, obj = str(src), str(inc), str(obj)
+        if os.name == "nt":
+            run([compiler, "/nologo"] + flags + ["/c", "/I" + inc,
+                                                 "/Fo" + obj, src])
+        else:
+            run([compiler] + flags + ["-I", inc, "-c", src, "-o", obj])
+
+    def link(binpath, *objs):
+        # type: (Path, object) -> None
+        parts = [str(o) for o in objs]
+        if os.name == "nt":
+            run([compiler, "/nologo", "/O2", "/EHsc"] + parts +
+                ["/Fe" + str(binpath)])
+        else:
+            run([compiler, "-O2", "-o", str(binpath)] + parts)
 
     harness_src = root / "bench" / "local_bench.cpp"
     impl_src = root / "bench" / "local_impl.cpp"
-    harness_a_o = build / "harness_a.o"
-    harness_b_o = build / "harness_b.o"
-    impl_a_o = build / "impl_a.o"
-    impl_b_o = build / "impl_b.o"
-    bin_a = build / "bench_a"
-    bin_b = build / "bench_b"
+    harness_a_o = build / ("harness_a" + obj_ext)
+    harness_b_o = build / ("harness_b" + obj_ext)
+    impl_a_o = build / ("impl_a" + obj_ext)
+    impl_b_o = build / ("impl_b" + obj_ext)
+    bin_a = build / ("bench_a" + bin_ext)
+    bin_b = build / ("bench_b" + bin_ext)
 
     # Each binary gets a harness TU compiled against its OWN tree.  The
     # two headers may declare different class layouts (extra scratch
     # members), so sharing one harness object would size stack canvases
     # with the wrong header when the A tree is larger than the B tree.
     print("compile harness A+B: %s" % comp_banner, flush=True)
-    run([compiler] + harness_flags + ["-I", str(tree_a), "-c",
-                                      str(harness_src), "-o", str(harness_a_o)])
-    run([compiler] + harness_flags + ["-I", str(tree_b), "-c",
-                                      str(harness_src), "-o", str(harness_b_o)])
-    print("compile lib A (-std=c++03)", flush=True)
-    run([compiler] + lib_flags + ["-I", str(tree_a), "-c",
-                                  str(impl_src), "-o", str(impl_a_o)])
-    print("compile lib B (-std=c++03)", flush=True)
-    run([compiler] + lib_flags + ["-I", str(tree_b), "-c",
-                                  str(impl_src), "-o", str(impl_b_o)])
-    run([compiler, "-O2", "-o", str(bin_a),
-         str(harness_a_o), str(impl_a_o)])
-    run([compiler, "-O2", "-o", str(bin_b),
-         str(harness_b_o), str(impl_b_o)])
+    if not args.single:
+        compile_one(harness_src, tree_a, harness_a_o, harness_flags)
+    compile_one(harness_src, tree_b, harness_b_o, harness_flags)
+    if not args.single:
+        print("compile lib A: %s" % " ".join(lib_flags), flush=True)
+        compile_one(impl_src, tree_a, impl_a_o, lib_flags)
+    print("compile lib B: %s" % " ".join(lib_flags), flush=True)
+    compile_one(impl_src, tree_b, impl_b_o, lib_flags)
+    if not args.single:
+        link(bin_a, harness_a_o, impl_a_o)
+    link(bin_b, harness_b_o, impl_b_o)
 
     names = [w for w in WORKLOADS
              if not args.workloads or w in args.workloads.split(",")]
@@ -214,9 +300,10 @@ def main():
         return parse_time(run([str(binary), str(args.trials), workload]))
 
     for lap in (1, 2):
-        print("warmup A (all workloads, lap %d/2)" % lap, flush=True)
-        for name in names:
-            once(bin_a, name)
+        if not args.single:
+            print("warmup A (all workloads, lap %d/2)" % lap, flush=True)
+            for name in names:
+                once(bin_a, name)
         print("warmup B (all workloads, lap %d/2)" % lap, flush=True)
         for name in names:
             once(bin_b, name)
@@ -229,9 +316,14 @@ def main():
     collected_b = {name: [] for name in names}  # type: dict
     for name in names:
         for pair in range(args.pairs):
-            collected_a[name].append(once(bin_a, name))
+            if not args.single:
+                collected_a[name].append(once(bin_a, name))
             collected_b[name].append(once(bin_b, name))
         print("done %s" % name, flush=True)
+
+    if args.single:
+        return single_report(args, names, collected_b, ours_id, ours_sha,
+                             dirty, comp_banner, lib_flags, harness_flags)
 
     workloads = {}
     gated_a, gated_b = [], []

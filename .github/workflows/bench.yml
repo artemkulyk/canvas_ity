@@ -4,14 +4,13 @@ on:
   push:
     branches:
       - main
-      - eval/**
   pull_request:
   workflow_dispatch:
     inputs:
       base_ref:
-        description: git ref for A/B baseline header (empty = single-tree on main)
+        description: git ref for A/B baseline header (default 8be29cb)
         required: false
-        default: ""
+        default: 8be29cb
 
 jobs:
   bench:
@@ -38,11 +37,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Fetch comparison refs
-        if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/eval/') || github.event_name == 'workflow_dispatch'
-        run: git fetch origin main --no-tags --prune
-
-      - name: Run microbench
+      - name: "Run bench (split TU: lib -O2 C++03, harness C++11)"
         shell: bash
         env:
           BASE_REF: ${{ github.event.inputs.base_ref }}
@@ -50,43 +45,60 @@ jobs:
           REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          if [ -n "${BASE_REF:-}" ]; then
-            git cat-file -e "${BASE_REF}^{commit}" 2>/dev/null || \
-              git fetch origin "${BASE_REF}" --no-tags || \
-              git fetch origin "+${BASE_REF}:${BASE_REF}" --no-tags || true
-            mkdir -p base-inc
-            git show "${BASE_REF}:src/canvas_ity.hpp" > base-inc/canvas_ity.hpp
-            python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json \
-              --base-include base-inc --base-label "${BASE_REF}"
+          # All include paths inside bench/local_ab.py are absolute, so
+          # this works no matter what the runner cwd is (MSVC on CI
+          # runs with bench/build as its cwd).
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            python bench/local_ab.py --pairs 7 --trials 9 \
+              --base "${BASE_REF:-8be29cb}" --out bench.json || true
           elif [ "${REF}" != "refs/heads/main" ] || [ "${EVENT_NAME}" = "pull_request" ]; then
-            mkdir -p base-inc
-            git show origin/main:src/canvas_ity.hpp > base-inc/canvas_ity.hpp
-            python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json \
-              --base-include base-inc --base-label origin/main
+            git fetch origin main --no-tags --prune
+            python bench/local_ab.py --pairs 7 --trials 9 \
+              --base origin/main --out bench.json || true
           else
-            python bench/ci_bench.py --repeats 5 --trials 5 --out bench.json
+            python bench/local_ab.py --pairs 7 --trials 9 \
+              --single --out bench.json
           fi
+          # ASCII-only report: safe for the Windows cp1252 console and
+          # for $GITHUB_STEP_SUMMARY on every runner.
+          python - <<'EOF' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          report = json.load(open("bench.json", encoding="utf-8"))
+          print("# Bench %s %s (%s)" % (
+              report["os"], report["arch"], report["compiler"]))
+          print("")
+          print("- lib: `%s`  harness: `%s`" % (
+              report["lib_flags"], report["harness_flags"]))
+          if report.get("mode") == "local_ab":
+              print("- base `%s` vs ours `%s`" % (
+                  report["base_id"], report["ours_sha"]))
+              print("- gated geo: %+.1f%% (base %.3f ms -> ours %.3f ms)" % (
+                  report["geo_delta_pct"], report["geo_a"], report["geo_b"]))
+              print("- verdict: %s wins=%s vetoes=%s unstable=%s demoted=%s" % (
+                  "KEEP_CANDIDATE" if report["keep_candidate"] else "DROP",
+                  report["clean_wins"], report["vetoes"],
+                  report["unstable"], report["demoted"]))
+              print("")
+              print("| workload | base | ours | delta | spread A | spread B | status |")
+              print("|---|---:|---:|---:|---:|---:|---|")
+              for name, s in report["workloads"].items():
+                  print("| %s | %.3f | %.3f | %+.1f%% | %.1f%% | %.1f%% | %s |" % (
+                      name, s["median_a"], s["median_b"], s["delta_pct"],
+                      100.0 * s["spread_a"], 100.0 * s["spread_b"],
+                      s["status"]))
+          else:
+              print("- ours `%s`" % report["ours_sha"])
+              print("- gated geo: %.3f ms" % report["geo_ms"])
+              print("")
+              print("| workload | median ms | spread | gated |")
+              print("|---|---:|---:|---|")
+              for name, s in report["workloads"].items():
+                  print("| %s | %.3f | %.1f%% | %s |" % (
+                      name, s["median_ms"], 100.0 * s["spread"],
+                      "yes" if s["gated"] else "no"))
+          EOF
 
       - uses: actions/upload-artifact@v4
         with:
           name: bench-${{ matrix.os }}
           path: bench.json
-
-  summarize:
-    needs: bench
-    if: always() && !cancelled()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.x"
-
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: bench-*
-
-      - name: Cross-platform summary
-        run: python bench/ci_bench.py --summarize artifacts
