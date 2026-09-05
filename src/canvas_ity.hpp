@@ -177,6 +177,15 @@ struct line_path { std::vector< xy > points;
 struct pixel_run { unsigned short x, y; float delta; };
 typedef std::vector< pixel_run > pixel_runs;
 
+// Analytic cell rasterizer prototype (AGG-style, adapted).  Integer
+// cover/area cells in 24.8 fixed point; see render_cells below.
+static int const cell_shift = 8;
+static int const cell_scale = 1 << cell_shift;
+static int const cell_mask = cell_scale - 1;
+static int const cell_dx_limit = 16384 << cell_shift;
+
+struct cell_cover { int x, y, cover, area; };
+
 class canvas
 {
 public:
@@ -1175,6 +1184,13 @@ private:
     pixel_runs scratch_runs2;
     std::vector< size_t > row_counts;
     std::vector< size_t > x_counts;
+    // Cell-rasterizer prototype scratch (reused across draws, same
+    // high-water-mark discipline as the run pipeline's buffers).
+    std::vector< cell_cover > cell_buffer;
+    std::vector< cell_cover > cell_swap;
+    std::vector< size_t > cell_rows;
+    std::vector< size_t > cell_cursor;
+    std::vector< size_t > cell_x_tally;
     font_face face;
     rgba *bitmap;
     canvas *saves;
@@ -1200,6 +1216,12 @@ private:
                            paint_brush const & );
     void draw_opaque_span( int, int, int, float, paint_brush const & );
     void fill_box( int, int, int, int, paint_brush const & );
+    void render_cells( paint_brush const & );
+    static void cell_push( cell_cover, std::vector< cell_cover > & );
+    static void cell_hline( int, int, int, int, int,
+                            std::vector< cell_cover > & );
+    static void cell_edge( int, int, int, int,
+                           std::vector< cell_cover > & );
     rgba paint_pixel( xy, paint_brush const & );
     void render_shadow( paint_brush const & );
     void render_main( paint_brush const & );
@@ -2809,6 +2831,664 @@ void canvas::render_shadow(
 // with coverage 1 that render_opaque would have issued for the
 // rect's runs are issued here in the same row order.
 //
+// Analytic cell rasterizer prototype (AGG-style, adapted).
+// Accumulates integer cover/area into per-pixel cells in 24.8
+// fixed point, sorts cells by row once, then sweeps each row with a
+// running cover exactly like the reference scanline rasterizer:
+// boundary pixels get coverage from (cover*512-area), interior runs
+// from cover*512, folded by the nonzero winding rule.  Coverage is
+// therefore the exact analytic value, which differs from the
+// trapezoidal run model by design (this prototype exists to measure
+// that difference, not to match it).  All painting and blending go
+// through the existing draw_span, so paint, gamma, dither, clip,
+// and composite behavior are unchanged; only coverage changes.
+//
+// Order two cells by column.  Used by the sparse-row fallback in
+// render_cells: rows whose cells cover a column range much wider
+// than their count are cheaper to comparison-sort than to count.
+static bool cell_x_less(
+    cell_cover left,
+    cell_cover right )
+{
+    return left.x < right.x;
+}
+
+// One edge walk in 24.8 fixed point, following the reference
+// integer DDA: render_hline distributes cover/area across the
+// cells of one scanline, line() splits overlong dx and steps
+// hline by hline.  Coordinates outside the canvas are kept (the
+// sweep clips to rows/columns); only canvas pixels become cells.
+
+void canvas::cell_push(
+    cell_cover cell,
+    std::vector< cell_cover > &cells )
+{
+    if ( cell.cover == 0 && cell.area == 0 )
+        return;
+    if ( cell.x < 0 || cell.x >= 32768 || cell.y < 0 || cell.y >= 32768 )
+        return;
+    cells.push_back( cell );
+}
+
+void canvas::cell_hline(
+    int ey,
+    int x1, int y1, int x2, int y2,
+    std::vector< cell_cover > &cells )
+{
+    int ex1 = x1 >> cell_shift;
+    int ex2 = x2 >> cell_shift;
+    int fx1 = x1 & cell_mask;
+    int fx2 = x2 & cell_mask;
+    int delta;
+    int first;
+    int incr = 1;
+    long long dx = static_cast< long long >( x2 ) - x1;
+    // Trivial case: horizontal in subpixels, covers nothing new.
+    if ( y1 == y2 )
+    {
+        cell_cover cell = { ex2, ey, 0, 0 };
+        (void)cell;
+        return;
+    }
+    if ( ex1 == ex2 )
+    {
+        delta = y2 - y1;
+        cell_cover cell = { ex1, ey, delta,
+                            ( fx1 + fx2 ) * delta };
+        cell_push( cell, cells );
+        return;
+    }
+    int p = ( cell_scale - fx1 ) * ( y2 - y1 );
+    first = cell_scale;
+    dx = static_cast< long long >( x2 ) - x1;
+    if ( dx < 0 )
+    {
+        p = fx1 * ( y2 - y1 );
+        first = 0;
+        incr = -1;
+        dx = -dx;
+    }
+    delta = static_cast< int >( p / dx );
+    int mod = static_cast< int >( p % dx );
+    if ( mod < 0 )
+    {
+        delta--;
+        mod += static_cast< int >( dx );
+    }
+    {
+        cell_cover cell = { ex1, ey, delta,
+                            ( fx1 + first ) * delta };
+        cell_push( cell, cells );
+    }
+    ex1 += incr;
+    // set_curr_cell equivalent: next push carries its own coords.
+    y1 += delta;
+    if ( ex1 != ex2 )
+    {
+        p = cell_scale * ( y2 - y1 + delta );
+        int lift = static_cast< int >( p / dx );
+        int rem = static_cast< int >( p % dx );
+        if ( rem < 0 )
+        {
+            lift--;
+            rem += static_cast< int >( dx );
+        }
+        mod -= static_cast< int >( dx );
+        while ( ex1 != ex2 )
+        {
+            delta = lift;
+            mod += rem;
+            if ( mod >= 0 )
+            {
+                mod -= static_cast< int >( dx );
+                delta++;
+            }
+            {
+                cell_cover cell = { ex1, ey, delta,
+                                    cell_scale * delta };
+                cell_push( cell, cells );
+            }
+            y1 += delta;
+            ex1 += incr;
+        }
+    }
+    delta = y2 - y1;
+    {
+        cell_cover cell = { ex2, ey, delta,
+                            ( fx2 + cell_scale - first ) * delta };
+        cell_push( cell, cells );
+    }
+}
+
+void canvas::cell_edge(
+    int x1, int y1, int x2, int y2,
+    std::vector< cell_cover > &cells )
+{
+    long long dx = static_cast< long long >( x2 ) - x1;
+    if ( dx >= cell_dx_limit || dx <= -cell_dx_limit )
+    {
+        int cx = static_cast< int >( ( static_cast< long long >( x1 ) +
+                                       x2 ) >> 1 );
+        int cy = static_cast< int >( ( static_cast< long long >( y1 ) +
+                                       y2 ) >> 1 );
+        cell_edge( x1, y1, cx, cy, cells );
+        cell_edge( cx, cy, x2, y2, cells );
+        return;
+    }
+    long long dy = static_cast< long long >( y2 ) - y1;
+    int ex1 = x1 >> cell_shift;
+    int ex2 = x2 >> cell_shift;
+    int ey1 = y1 >> cell_shift;
+    int ey2 = y2 >> cell_shift;
+    int fy1 = y1 & cell_mask;
+    int fy2 = y2 & cell_mask;
+    int x_from;
+    int rem;
+    int mod;
+    int lift;
+    int delta;
+    int first;
+    int incr = 1;
+    // Everything on a single hline.
+    if ( ey1 == ey2 )
+    {
+        cell_hline( ey1, x1, fy1, x2, fy2, cells );
+        return;
+    }
+    // Vertical line: exact per-cell values, no DDA needed.
+    // NOTE: matches the reference only when the edge is truly
+    // vertical in fixed point (x1 == x2 after quantize).  The caller
+    // guarantees this branch only in that case; otherwise fall
+    // through to the general walk below.
+    if ( x1 == x2 )
+    {
+        int ex = x1 >> cell_shift;
+        int two_fx = ( x1 - ( ex << cell_shift ) ) << 1;
+        int area;
+        first = cell_scale;
+        if ( dy < 0 )
+        {
+            first = 0;
+            incr = -1;
+        }
+        delta = first - fy1;
+        {
+            cell_cover cell = { ex, ey1, delta, two_fx * delta };
+            cell_push( cell, cells );
+        }
+        ey1 += incr;
+        delta = first + first - cell_scale;
+        area = two_fx * delta;
+        while ( ey1 != ey2 )
+        {
+            cell_cover cell = { ex, ey1, delta, area };
+            cell_push( cell, cells );
+            ey1 += incr;
+        }
+        delta = fy2 - cell_scale + first;
+        {
+            cell_cover cell = { ex, ey1, delta, two_fx * delta };
+            cell_push( cell, cells );
+        }
+        return;
+    }
+    // Several hlines.
+    int p = static_cast< int >( ( cell_scale - fy1 ) * dx );
+    first = cell_scale;
+    if ( dy < 0 )
+    {
+        p = static_cast< int >( fy1 * dx );
+        first = 0;
+        incr = -1;
+        dy = -dy;
+    }
+    delta = static_cast< int >( p / dy );
+    mod = static_cast< int >( p % dy );
+    if ( mod < 0 )
+    {
+        delta--;
+        mod += static_cast< int >( dy );
+    }
+    x_from = x1 + delta;
+    cell_hline( ey1, x1, fy1, x_from, first, cells );
+    ey1 += incr;
+    if ( ey1 != ey2 )
+    {
+        p = static_cast< int >( cell_scale * dx );
+        lift = static_cast< int >( p / dy );
+        rem = static_cast< int >( p % dy );
+        if ( rem < 0 )
+        {
+            lift--;
+            rem += static_cast< int >( dy );
+        }
+        mod -= static_cast< int >( dy );
+        while ( ey1 != ey2 )
+        {
+            delta = lift;
+            mod += rem;
+            if ( mod >= 0 )
+            {
+                mod -= static_cast< int >( dy );
+                delta++;
+            }
+            int x_to = x_from + delta;
+            cell_hline( ey1, x_from, cell_scale - first, x_to, first,
+                        cells );
+            x_from = x_to;
+            ey1 += incr;
+        }
+    }
+    cell_hline( ey1, x_from, cell_scale - first, x2, fy2, cells );
+}
+
+void canvas::render_cells(
+    paint_brush const &brush )
+{
+    // Fixed-point outline: canvas coordinates scaled by 256.
+    // AGG walk adapted to float edges: intersect each edge with each
+    // touched row band, then walk partial cells accumulating integer
+    // cover/area with the reference formulas:
+    //   first/last partial cell: cover += delta; area += (fx0+fx1)*delta
+    //   whole cells between: cover += delta; area += 256*delta
+    // Sweep follows the reference exactly: running cover, boundary
+    // pixel alpha from (cover*512-area), interior run alpha from
+    // cover*512, nonzero winding (absolute value), clamp to 255.
+    static double const scale = 256.0;
+    // Reused scratch buffers: no allocation after the high-water
+    // mark, same discipline as the run pipeline's vectors.
+    std::vector< cell_cover > &cells = cell_buffer;
+    cells.clear();
+    // Clip the fixed-point outline to the canvas BEFORE walking
+    // edges, exactly like the run pipeline's Sutherland-Hodgman
+    // clip: edges fully outside one side are dropped, straddling
+    // edges are intersected.  This keeps winding correct (no
+    // one-sided ghosts) and bounds cell coordinates.
+    float clip_l = 0.0f;
+    float clip_t = 0.0f;
+    float clip_r = static_cast< float >( size_x );
+    float clip_b = static_cast< float >( size_y );
+    size_t ending = 0;
+    for ( size_t subpath = 0; subpath < lines.subpaths.size(); ++subpath )
+    {
+        size_t beginning = ending;
+        ending += lines.subpaths[ subpath ].count;
+        if ( ending - beginning < 2 )
+            continue;
+        size_t last = ending - beginning;
+        // AGG walk: quantize endpoints to 24.8 fixed point, then walk
+        // the edge hline by hline with integer arithmetic, splitting
+        // overlong dx exactly like the reference line() splitter.
+        // Edges are directed path segments: walk from each point to
+        // the next, closing the loop explicitly.  fill_rectangle and
+        // other rect builders store 4 corners WITHOUT repeating the
+        // first (count 4, closed flag set), so index+1 would drop the
+        // closing edge; wraparound handles both encodings identically
+        // (for close_path()-appended loops the final edge is
+        // zero-length and contributes nothing).
+        for ( size_t index = 0; index < last; ++index )
+        {
+            xy from = lines.points[ beginning +
+                ( index ? index : last ) - 1 ];
+            xy to = lines.points[ beginning + index ];
+            // Per-edge Sutherland-Hodgman clip against the canvas
+            // (Cohen-Sutherland style): drop fully-outside edges,
+            // intersect straddling ones.  Matches the run pipeline's
+            // clip-then-clamp behavior for winding purposes.
+            {
+                float fminx = from.x < to.x ? from.x : to.x;
+                float fmaxx = from.x > to.x ? from.x : to.x;
+                float fminy = from.y < to.y ? from.y : to.y;
+                float fmaxy = from.y > to.y ? from.y : to.y;
+                if ( fmaxx <= clip_l || fminx >= clip_r ||
+                     fmaxy <= clip_t || fminy >= clip_b )
+                    continue;
+                if ( fminx < clip_l || fmaxx > clip_r ||
+                     fminy < clip_t || fmaxy > clip_b )
+                {
+                    // Liang-Barsky clip of the segment.
+                    float t0 = 0.0f;
+                    float t1 = 1.0f;
+                    float dx = to.x - from.x;
+                    float dy = to.y - from.y;
+                    float p[ 4 ] = { -dx, dx, -dy, dy };
+                    float q[ 4 ] = { from.x - clip_l, clip_r - from.x,
+                                     from.y - clip_t, clip_b - from.y };
+                    bool accept = true;
+                    for ( int edge = 0; edge < 4; ++edge )
+                    {
+                        if ( p[ edge ] == 0.0f )
+                        {
+                            if ( q[ edge ] < 0.0f )
+                                accept = false;
+                        }
+                        else
+                        {
+                            float r = q[ edge ] / p[ edge ];
+                            if ( p[ edge ] < 0.0f )
+                            {
+                                if ( r > t1 )
+                                    accept = false;
+                                else if ( r > t0 )
+                                    t0 = r;
+                            }
+                            else
+                            {
+                                if ( r < t0 )
+                                    accept = false;
+                                else if ( r < t1 )
+                                    t1 = r;
+                            }
+                        }
+                        if ( !accept )
+                            break;
+                    }
+                    if ( !accept || t0 >= t1 )
+                        continue;
+                    from = xy( from.x + dx * t0, from.y + dy * t0 );
+                    to = xy( from.x + dx * ( t1 - t0 ),
+                             from.y + dy * ( t1 - t0 ) );
+                }
+            }
+            int x1 = static_cast< int >( floor( from.x * scale ) );
+            int y1 = static_cast< int >( floor( from.y * scale ) );
+            int x2 = static_cast< int >( floor( to.x * scale ) );
+            int y2 = static_cast< int >( floor( to.y * scale ) );
+            cell_edge( x1, y1, x2, y2, cells );
+        }
+    }
+    if ( cells.empty() )
+        return;
+
+    // Order cells by (row, column) with two counting sorts instead
+    // of a comparison sort: tally per row over the whole canvas,
+    // scatter rows into the swap buffer, then per row tally by
+    // column (x is bounded by the canvas width) and scatter back.
+    // The produced order is identical to the previous (y, x) sort,
+    // so rendered output is unchanged; cost is linear in cells plus
+    // O(rows * width) for the per-row tally ranges.
+    // Bucket over the shape's LOCAL row span (exactly like the run
+    // pipeline's row buckets): tiny fills then pay O(shape) per
+    // draw, not O(canvas).  The x tally is persistent and zeroed
+    // only over its used range per row, so its per-draw cost is
+    // zero as well.
+    size_t low_y = cells[ 0 ].y;
+    size_t high_y = low_y;
+    for ( size_t i = 1; i < cells.size(); ++i )
+    {
+        size_t y = static_cast< size_t >( cells[ i ].y );
+        low_y = y < low_y ? y : low_y;
+        high_y = y > high_y ? y : high_y;
+    }
+    size_t span = high_y - low_y + 1;
+    cell_rows.assign( span + 1, 0 );
+    for ( size_t i = 0; i < cells.size(); ++i )
+        ++cell_rows[ static_cast< size_t >( cells[ i ].y ) - low_y ];
+    size_t total = 0;
+    for ( size_t r = 0; r <= span; ++r )
+    {
+        size_t count = cell_rows[ r ];
+        cell_rows[ r ] = total;
+        total += count;
+    }
+    cell_swap.resize( cells.size() );
+    cell_cursor = cell_rows;
+    for ( size_t i = 0; i < cells.size(); ++i )
+        cell_swap[ cell_cursor[ static_cast< size_t >( cells[ i ].y ) -
+                               low_y ]++ ] = cells[ i ];
+    if ( cell_x_tally.size() < size_x + 2 )
+        cell_x_tally.assign( size_x + 2, 0 );
+    for ( size_t r = 0; r < span; ++r )
+    {
+        size_t begin = cell_rows[ r ];
+        size_t end = cell_rows[ r + 1 ];
+        if ( end - begin < 2 )
+            continue;
+        // Per-row ordering by size and density: tiny rows use an
+        // inline insertion sort (no call overhead — the reference
+        // sorter's skeleton dominates at this size); larger dense
+        // rows use counting sort (linear in cells plus the covered
+        // column range); larger sparse rows (cells covering a
+        // column range much wider than their count, e.g. thin wide
+        // rings) use a comparison sort on the row slice.  All three
+        // produce the same x order, and cells sharing an x sum
+        // integer cover/area (commutative), so the rendered output
+        // is identical either way.
+        size_t count = end - begin;
+        if ( count <= 12 )
+        {
+            for ( size_t i = begin + 1; i < end; ++i )
+            {
+                cell_cover value = cell_swap[ i ];
+                size_t hole = i;
+                for ( ; hole > begin && value.x <
+                          cell_swap[ hole - 1 ].x; --hole )
+                    cell_swap[ hole ] = cell_swap[ hole - 1 ];
+                cell_swap[ hole ] = value;
+            }
+            for ( size_t i = begin; i < end; ++i )
+                cells[ i ] = cell_swap[ i ];
+            continue;
+        }
+        size_t low_x = size_x + 1;
+        size_t high_x = 0;
+        for ( size_t i = begin; i < end; ++i )
+        {
+            size_t x = static_cast< size_t >( cell_swap[ i ].x );
+            if ( x < low_x )
+                low_x = x;
+            if ( x > high_x )
+                high_x = x;
+        }
+        size_t range = high_x - low_x + 1;
+        if ( range <= 4 * count )
+        {
+            for ( size_t i = begin; i < end; ++i )
+                ++cell_x_tally[ static_cast< size_t >(
+                    cell_swap[ i ].x ) ];
+            size_t placed = begin;
+            for ( size_t x = low_x; x <= high_x; ++x )
+            {
+                size_t tally = cell_x_tally[ x ];
+                cell_x_tally[ x ] = placed;
+                placed += tally;
+            }
+            for ( size_t i = begin; i < end; ++i )
+                cells[ cell_x_tally[ cell_swap[ i ].x ]++ ] =
+                    cell_swap[ i ];
+            for ( size_t x = low_x; x <= high_x; ++x )
+                cell_x_tally[ x ] = 0;
+        }
+        else
+        {
+            std::sort( cell_swap.begin() +
+                           static_cast< ptrdiff_t >( begin ),
+                       cell_swap.begin() +
+                           static_cast< ptrdiff_t >( end ),
+                       cell_x_less );
+            for ( size_t i = begin; i < end; ++i )
+                cells[ i ] = cell_swap[ i ];
+        }
+    }
+    // Sweep with running cover (nonzero winding), following the
+    // reference: cells accumulate cover AND area across the whole
+    // row.  The span [prev_col, col) BEFORE each cell is painted
+    // with the cover that EXCLUDES this cell (constant winding over
+    // the gap); each cell's own pixel is painted from
+    // (cover_including_this_cell * 512 - area).  Rows are
+    // independent: reset the running cover at each row.
+    // Adjacent spans with equal coverage are coalesced before
+    // painting (the blend is per-pixel stateless given coverage and
+    // visibility, so coalescing is byte-identical and removes the
+    // span splits the piece cells introduce).  Full-coverage spans
+    // of an opaque solid brush go through draw_opaque_span, matching
+    // the run pipeline's opaque walk.
+    bool const opaque_solid = brush.type == paint_brush::color &&
+                              !brush.colors.empty() &&
+                              brush.colors.front().a == 1.0f &&
+                              global_alpha == 1.0f;
+    size_t index = 0;
+    while ( index < cells.size() )
+    {
+        int row = cells[ index ].y;
+        if ( row < 0 || row >= size_y )
+        {
+            while ( index < cells.size() && cells[ index ].y == row )
+                ++index;
+            continue;
+        }
+        int cover = 0;
+        int prev = -1;
+        bool pend_valid = false;
+        int pend_b = 0;
+        int pend_e = 0;
+        int pend_c = 0;
+        while ( index < cells.size() && cells[ index ].y == row )
+        {
+            int col = cells[ index ].x;
+            int cell_cover_sum = 0;
+            int area = 0;
+            while ( index < cells.size() &&
+                    cells[ index ].y == row && cells[ index ].x == col )
+            {
+                cell_cover_sum += cells[ index ].cover;
+                area += cells[ index ].area;
+                ++index;
+            }
+            if ( col < -1 || col > size_x )
+            {
+                // Far off-canvas cell still contributes winding to
+                // the rest of the row but has no pixels of its own.
+                cover += cell_cover_sum;
+                continue;
+            }
+            // Boundary-adjacent off-canvas cell: contributes
+            // winding and its own edge pixel clamped into the
+            // canvas (the run pipeline clamps coverage runs to
+            // [0,size_x) the same way).
+            if ( col < 0 || col >= size_x )
+            {
+                cover += cell_cover_sum;
+                int clamped = col < 0 ? 0 : size_x - 1;
+                if ( area )
+                {
+                    int edge = ( cover * ( cell_scale * 2 ) - area ) >>
+                        ( cell_shift + 1 );
+                    if ( edge < 0 )
+                        edge = -edge;
+                    if ( edge > cell_scale )
+                        edge = cell_scale;
+                    if ( edge )
+                    {
+                        if ( pend_valid && pend_e == clamped &&
+                             pend_c == edge )
+                            pend_e = clamped + 1;
+                        else
+                        {
+                            if ( pend_valid )
+                            {
+                                if ( pend_c == cell_scale && opaque_solid )
+                                    draw_opaque_span( pend_b, pend_e, row,
+                                                      1.0f, brush );
+                                else
+                                    draw_span( pend_b, pend_e, row,
+                                               pend_c / float( cell_scale ),
+                                               1.0f, brush );
+                            }
+                            pend_b = clamped;
+                            pend_e = clamped + 1;
+                            pend_c = edge;
+                            pend_valid = true;
+                        }
+                    }
+                }
+                prev = col;
+                continue;
+            }
+            // Gap BEFORE this cell: cover excludes this cell.
+            // A gap starting at x=0 (no cell to its left on this
+            // row) is inside exactly when the winding here is
+            // nonzero; the reference emits it via the row's
+            // leading implicit cover, so handle prev<0 the same.
+            if ( col > prev + 1 )
+            {
+                int interior = cover;
+                if ( interior < 0 )
+                    interior = -interior;
+                if ( interior > cell_scale )
+                    interior = cell_scale;
+                if ( interior )
+                {
+                    if ( pend_valid && pend_e == prev + 1 &&
+                         pend_c == interior )
+                        pend_e = col;
+                    else
+                    {
+                        if ( pend_valid )
+                        {
+                            if ( pend_c == cell_scale && opaque_solid )
+                                draw_opaque_span( pend_b, pend_e, row,
+                                                  1.0f, brush );
+                            else
+                                draw_span( pend_b, pend_e, row,
+                                           pend_c / float( cell_scale ),
+                                           1.0f, brush );
+                        }
+                        pend_b = prev + 1;
+                        pend_e = col;
+                        pend_c = interior;
+                        pend_valid = true;
+                    }
+                }
+            }
+            cover += cell_cover_sum;
+            // Boundary pixel: the reference always evaluates
+            // (cover*512-area), even when area is zero (a vertical
+            // edge exactly on the boundary still covers its pixel
+            // fully via |cover|).  No area gate here.
+            {
+                int edge = ( cover * ( cell_scale * 2 ) - area ) >>
+                    ( cell_shift + 1 );
+                if ( edge < 0 )
+                    edge = -edge;
+                if ( edge > cell_scale )
+                    edge = cell_scale;
+                if ( edge )
+                {
+                    if ( pend_valid && pend_e == col && pend_c == edge )
+                        pend_e = col + 1;
+                    else
+                    {
+                        if ( pend_valid )
+                        {
+                            if ( pend_c == cell_scale && opaque_solid )
+                                draw_opaque_span( pend_b, pend_e, row,
+                                                  1.0f, brush );
+                            else
+                                draw_span( pend_b, pend_e, row,
+                                           pend_c / float( cell_scale ),
+                                           1.0f, brush );
+                        }
+                        pend_b = col;
+                        pend_e = col + 1;
+                        pend_c = edge;
+                        pend_valid = true;
+                    }
+                }
+            }
+            prev = col;
+        }
+        if ( pend_valid )
+        {
+            if ( pend_c == cell_scale && opaque_solid )
+                draw_opaque_span( pend_b, pend_e, row, 1.0f, brush );
+            else
+                draw_span( pend_b, pend_e, row,
+                           pend_c / float( cell_scale ), 1.0f, brush );
+        }
+    }
+}
+
 void canvas::fill_box(
     int left,
     int top,
@@ -3465,6 +4145,43 @@ void canvas::render_main_pass(
     if ( forward.a * forward.d - forward.b * forward.c == 0.0f )
         return;
     render_shadow( brush );
+#ifdef CELL_PROTO
+    // Prototype hook: bypass the run pipeline with the analytic
+    // cell sweep for plain solid fills (no clip).  Everything else
+    // uses the production path.  Non-source-over clearing ops still
+    // need the generic walk (it clears outside the shape); only
+    // source-over takes the cell path.
+    if ( !clipped && shadow_color.a == 0.0f &&
+         brush.type == paint_brush::color && !brush.colors.empty() &&
+         global_composite_operation == source_over &&
+         global_alpha == 1.0f && forward.b == 0.0f &&
+         forward.c == 0.0f && inverse.b == 0.0f &&
+         inverse.c == 0.0f )
+    {
+        // Overscan shapes (any corner outside the canvas) stay on
+        // the run pipeline: the cell clip drops fully-outside
+        // edges, which can empty the cell set for shapes whose
+        // interior still covers the canvas.
+        bool overscan = false;
+        for ( size_t i = 0; i < lines.points.size(); ++i )
+            if ( lines.points[ i ].x < 0.0f ||
+                 lines.points[ i ].y < 0.0f ||
+                 lines.points[ i ].x > size_x ||
+                 lines.points[ i ].y > size_y )
+            {
+                overscan = true;
+                break;
+            }
+        if ( !overscan )
+        {
+            prepare_gradient( brush );
+            render_cells( brush );
+            gradient_prepared = false;
+            return;
+        }
+        // fall through to the generic run pipeline below
+    }
+#endif
     // Blend2D-BoxA analogue: a single axis-aligned rect that lands on
     // pixel boundaries skips scan conversion, sorting, and the run
     // walk entirely.  Fires only when the transformed corners are
