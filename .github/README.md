@@ -322,6 +322,74 @@ the test results, run tests repeatedly to benchmark them, run just a subset
 of the test, or write out a new table of expected image hashes.  Run the
 program with `--help` to see the usage guide for more on these.
 
+## :gear: Experimental cell-based rasterizer
+
+This branch carries an experimental variant of the library that adds an
+analytic coverage-cell rasterizer (in the style of AGG or FreeType) behind
+the exact same single-header API.  It is opt-in at compile time:
+
+```
+c++ -O2 -DCELL_PROTO -o demo demo.cpp
+```
+
+The header itself is unchanged in shape and usage — define
+`CANVAS_ITY_IMPLEMENTATION`, include `canvas_ity.hpp`, and draw as usual.
+Without the `CELL_PROTO` define, the library behaves exactly as the
+production version (the accompanying test suite passes 78 of 78 hash-pinned
+cases).  With the define, plain solid fills — no clip, no shadow, source
+over, axis-aligned transform — are scan converted by the cell rasterizer
+instead of the trapezoidal run pipeline.  Everything else (strokes,
+gradients, patterns, images, clipped or shadowed shapes, other compositing
+operations) keeps the production path.
+
+**Speed.**  On a 17-workload microbenchmark (Apple M1, clang `-O2`,
+single-threaded, each trial rendering a deterministic identical scene,
+best of 15 trials with warm-up, minimum of 3 interleaved passes), the
+cell rasterizer renders solid fills about 1.09x faster overall:
+
+| workload          | default (ms) | `-DCELL_PROTO` (ms) | speedup |
+|-------------------|-------------:|--------------------:|--------:|
+| path_construction |        2.013 |               2.002 |   1.01x |
+| flattening_fill   |       18.035 |               8.362 |   2.16x |
+| fill_small        |        8.209 |               6.187 |   1.33x |
+| fill_large        |        5.013 |               5.286 |  ~1.00x |
+| fill_zone_plate   |        5.382 |               4.731 |   1.14x |
+| stroke_many       |       26.482 |              26.775 |   0.99x |
+| stroke_wide       |       66.168 |              66.111 |   1.00x |
+| gradient_linear   |       15.335 |              15.462 |   0.99x |
+| gradient_radial   |       22.559 |              22.580 |   1.00x |
+| pattern_tiled     |       41.615 |              41.778 |   1.00x |
+| image_scaled      |       47.901 |              48.241 |   0.99x |
+| clip_heavy        |        2.270 |               2.274 |   1.00x |
+| composite_ops     |        1.796 |               1.793 |   1.00x |
+| shadow_blurred    |       44.963 |              44.789 |   1.00x |
+| transforms        |        9.144 |               9.110 |   1.00x |
+| many_primitives   |        9.715 |               7.212 |   1.35x |
+| complex_scene     |       28.143 |              28.252 |   1.00x |
+| **geo mean**      |     **12.502** |            **11.511** | **1.09x** |
+
+**The tradeoff.**  The speedup applies only to the solid-fill fast path:
+dense curve fills flatten by up to 2.2x and fields of small shapes by
+about a third, but strokes, gradients, patterns, and images see no
+benefit, and the workload most sensitive to memory bandwidth
+(`fill_large`, twenty fullscreen solid fills) measures at parity within
+run-to-run noise.  More importantly, the cell rasterizer computes pixel
+coverage with different arithmetic than the trapezoidal pipeline, so
+anti-aliasing fringes are **not bit-identical** to the production
+renderer: across the 17-scene correctness corpus roughly 136k of 2.39M
+pixels differ, on 5 of the 17 scenes (the differing fringe is arguably a
+more accurate coverage model, but adopting it outright would require
+regenerating the test suite's expected hashes).  The header also carries
+both rasterizers (about 5,200 lines rather than 4,500), so default builds
+include the unused cell code.
+
+This is offered as an experiment for evaluation, not as a supported
+quality-for-speed option: the library's stated priorities are unchanged,
+and the default rendering path remains exactly the production one.
+The benchmark driver, the external-library comparison harnesses, and the
+build script that reproduces the table above live under
+[`bench/`](../bench/cleanbench.sh).
+
 ## :copyright: License
 
 This software is distributed as open source under the terms of the permissive
