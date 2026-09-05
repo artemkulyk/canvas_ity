@@ -18,6 +18,17 @@
 //   a bicubic pattern sampler.
 // - composite_ops: canvas_ity's 11 ops map onto QPainter composition
 //   modes; lighter maps to CompositionMode_Plus.
+// - Qt's antialiased rasterizer (the bundled FreeType gray raster) is
+//   superlinear in the number of cells per row of a single outline
+//   (per-row cell linked-list insertion), so one large dense path can
+//   cost several times more than the same geometry issued as smaller
+//   paths.  For the opaque single-color workloads (flattening_fill,
+//   stroke_many, stroke_wide) the harness therefore issues one
+//   drawPath per subpath: the geometry, RNG stream, and rendered
+//   result are unchanged (opaque source-over draws commute), and the
+//   measurement reflects scene cost rather than an outline-size
+//   pathology.  complex_scene is NOT split: its fills and strokes are
+//   translucent, so batching changes blending results.
 // - Qt requires a QGuiApplication/QCoreApplication object; we use
 //   QCoreApplication with QT_QPA_PLATFORM=offscreen so no display
 //   or GPU is involved (software raster path).
@@ -125,19 +136,22 @@ static void path_construction( QPainter &, int, int )
 
 static void flattening_fill( QPainter &ctx, int width, int height )
 {
-    QPainterPath path;
+    ctx.setBrush( QColor::fromRgbF( 0.2, 0.4, 0.8, 1.0 ) );
+    ctx.setPen( Qt::NoPen );
+    // One drawPath per subpath: opaque fills commute, so the rendered
+    // result is unchanged, and Qt's AA rasterizer is superlinear in
+    // the size of a single outline (see the header note).
     for ( int subpath = 0; subpath < 60; ++subpath )
     {
+        QPainterPath path;
         path.moveTo( frand() * width, frand() * height );
         for ( int step = 0; step < 12; ++step )
             path.cubicTo( frand() * width, frand() * height,
                           frand() * width, frand() * height,
                           frand() * width, frand() * height );
         path.closeSubpath();
+        ctx.drawPath( path );
     }
-    ctx.setBrush( QColor::fromRgbF( 0.2, 0.4, 0.8, 1.0 ) );
-    ctx.setPen( Qt::NoPen );
-    ctx.drawPath( path );
 }
 
 static void fill_small( QPainter &ctx, int width, int height )
@@ -186,15 +200,18 @@ static void stroke_many( QPainter &ctx, int width, int height )
     pen.setWidthF( 1.5 );
     ctx.setPen( pen );
     ctx.setBrush( Qt::NoBrush );
-    QPainterPath path;
+    // One drawPath per bezier: opaque strokes commute, so the rendered
+    // result is unchanged, and Qt's AA rasterizer is superlinear in
+    // the size of a single outline (see the header note).
     for ( int step = 0; step < 400; ++step )
     {
+        QPainterPath path;
         path.moveTo( frand() * width, frand() * height );
         path.cubicTo( frand() * width, frand() * height,
                       frand() * width, frand() * height,
                       frand() * width, frand() * height );
+        ctx.drawPath( path );
     }
-    ctx.drawPath( path );
 }
 
 static void stroke_wide( QPainter &ctx, int width, int height )
@@ -204,16 +221,19 @@ static void stroke_wide( QPainter &ctx, int width, int height )
     pen.setJoinStyle( Qt::RoundJoin );
     ctx.setPen( pen );
     ctx.setBrush( Qt::NoBrush );
-    QPainterPath path;
+    // One drawPath per subpath: opaque strokes commute, so the rendered
+    // result is unchanged, and Qt's AA rasterizer is superlinear in
+    // the size of a single outline (see the header note).
     for ( int step = 0; step < 100; ++step )
     {
+        QPainterPath path;
         path.moveTo( frand() * width, frand() * height );
         for ( int part = 0; part < 6; ++part )
             path.cubicTo( frand() * width, frand() * height,
                           frand() * width, frand() * height,
                           frand() * width, frand() * height );
+        ctx.drawPath( path );
     }
-    ctx.drawPath( path );
 }
 
 static void gradient_linear( QPainter &ctx, int width, int height )
