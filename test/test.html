@@ -1490,6 +1490,28 @@ to see how the HTML5 API maps to the library's API and vice-versa.</p>
 </div>
 
 <div>
+<h2>arc_<wbr>span</h2>
+<canvas id="arc_span" width="256" height="256"></canvas>
+<script type="text/javascript">
+    window.addEventListener( "load", function( event ) {
+        const element = document.getElementById( "arc_span" );
+        const that = element.getContext( "2d" );
+        const width = element.width;
+        const height = element.height;
+        const tau = 6.28318531;
+        that.strokeStyle = "#000000";
+        that.lineWidth = 16.0;
+        that.beginPath();
+        that.arc( 0.30 * width, 0.5 * height, 48.0, 3.2, -3.2 );
+        that.stroke();
+        that.beginPath();
+        that.arc( 0.70 * width, 0.5 * height, 48.0, 3.2, -3.2 + tau );
+        that.stroke();
+    } );
+</script>
+</div>
+
+<div>
 <h2>rectangle</h2>
 <canvas id="rectangle" width="256" height="256"></canvas>
 <script type="text/javascript">

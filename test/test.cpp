@@ -1199,6 +1199,19 @@ void arc( canvas &that, float width, float height )
         }
 }
 
+void arc_span( canvas &that, float width, float height )
+{
+    that.set_color( stroke_style, 0.0f, 0.0f, 0.0f, 1.0f );
+    that.set_line_width( 16.0f );
+    static float const tau = 6.28318531f;
+    that.begin_path();
+    that.arc( 0.30f * width, 0.5f * height, 48.0f, 3.2f, -3.2f );
+    that.stroke();
+    that.begin_path();
+    that.arc( 0.70f * width, 0.5f * height, 48.0f, 3.2f, -3.2f + tau );
+    that.stroke();
+}
+
 void rectangle( canvas &that, float width, float height )
 {
     that.set_color( stroke_style, 0.0f, 0.0f, 0.0f, 1.0f );
@@ -2295,6 +2308,7 @@ struct test
     { 0x5f523029, 256, 256, bezier_curve_to, "bezier_curve_to" },
     { 0x1f847aaf, 256, 256, arc_to, "arc_to" },
     { 0x26457553, 256, 256, arc, "arc" },
+    { 0x1da2bc2b, 256, 256, arc_span, "arc_span" },
     { 0x7520990c, 256, 256, rectangle, "rectangle" },
     { 0xf1d774dc, 256, 256, fill, "fill" },
     { 0x5e6e6b75, 256, 256, fill_rounding, "fill_rounding" },

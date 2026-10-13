@@ -4037,11 +4037,15 @@ void canvas::arc(
     static float const tau = 6.28318531f;
     float winding = counter_clockwise ? -1.0f : 1.0f;
     float from = fmodf( start_angle, tau );
-    float span = fmodf( end_angle, tau ) - from;
+    float span;
     if ( ( end_angle - start_angle ) * winding >= tau )
         span = tau * winding;
-    else if ( span * winding < 0.0f )
-        span += tau * winding;
+    else
+    {
+        span = fmodf( end_angle - start_angle, tau );
+        if ( span * winding < 0.0f )
+            span += tau * winding;
+    }
     xy centered_1 = radius * xy( cosf( from ), sinf( from ) );
     line_to( x + centered_1.x, y + centered_1.y );
     if ( span == 0.0f )
