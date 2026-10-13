@@ -819,6 +819,16 @@ void line_dash_closed( canvas &that, float width, float height )
                            0.8125f * width, 0.8125f * height );
 }
 
+void line_dash_seam( canvas &that, float width, float height )
+{
+    that.set_color( stroke_style, 0.0f, 0.0f, 0.0f, 1.0f );
+    that.line_cap = butt;
+    that.set_line_width( 24.0f );
+    float segments[] = { 60.0f, 30.0f };
+    that.set_line_dash( segments, 2 );
+    that.stroke_rectangle( 40.0f, 80.0f, 90.0f, 60.0f );
+}
+
 void line_dash_overlap( canvas &that, float width, float height )
 {
     that.set_color( stroke_style, 0.0f, 0.0f, 0.0f, 1.0f );
@@ -2273,7 +2283,7 @@ struct test
     { 0x36e7fa56, 256, 256, translate, "translate" },
     { 0xcfae3e4f, 256, 256, transform, "transform" },
     { 0x98f5594a, 256, 256, transform_fill, "transform_fill" },
-    { 0x822964b0, 256, 256, transform_stroke, "transform_stroke" },
+    { 0x633b0969, 256, 256, transform_stroke, "transform_stroke" },
     { 0xb7056a3a, 256, 256, set_transform, "set_transform" },
     { 0x8f6dd6c3, 256, 256, global_alpha, "global_alpha" },
     { 0x98a0609d, 256, 256, global_composite_operation, "global_composite_operation" },
@@ -2282,7 +2292,7 @@ struct test
     { 0xcdeba51c, 256, 256, shadow_offset_offscreen, "shadow_offset_offscreen" },
     { 0x5b542224, 256, 256, shadow_blur, "shadow_blur" },
     { 0xd6c150e6, 256, 256, shadow_blur_offscreen, "shadow_blur_offscreen" },
-    { 0x5affc092, 256, 256, shadow_blur_composite, "shadow_blur_composite" },
+    { 0x7e2287df, 256, 256, shadow_blur_composite, "shadow_blur_composite" },
     { 0x1720e9b2, 256, 256, line_width, "line_width" },
     { 0xf8d2bb0d, 256, 256, line_width_angular, "line_width_angular" },
     { 0x7bda8673, 256, 256, line_cap, "line_cap" },
@@ -2292,7 +2302,8 @@ struct test
     { 0xe68273e2, 256, 256, miter_limit, "miter_limit" },
     { 0x27c38a8a, 256, 256, line_dash_offset, "line_dash_offset" },
     { 0x129f9595, 256, 256, line_dash, "line_dash" },
-    { 0x88a74152, 256, 256, line_dash_closed, "line_dash_closed" },
+    { 0xc3c5ff74, 256, 256, line_dash_closed, "line_dash_closed" },
+    { 0xb204dc1d, 256, 256, line_dash_seam, "line_dash_seam" },
     { 0x064f194d, 256, 256, line_dash_overlap, "line_dash_overlap" },
     { 0xf7249c0b, 256, 256, line_dash_offscreen, "line_dash_offscreen" },
     { 0xeb4338e8, 256, 256, color, "color" },
@@ -2331,7 +2342,7 @@ struct test
     { 0x72cb6b06, 256, 256, text_baseline, "text_baseline" },
     { 0x4d41daa2, 256, 256, font, "font" },
     { 0x70e3232d, 256, 256, fill_text, "fill_text" },
-    { 0xed6477c8, 256, 256, stroke_text, "stroke_text" },
+    { 0x059051f4, 256, 256, stroke_text, "stroke_text" },
     { 0x32d1ee3b, 256, 256, measure_text, "measure_text" },
     { 0x905992e4, 256, 256, malformed_font, "malformed_font" },
     { 0xe46d1204, 256, 256, extreme_shadow, "extreme_shadow" },
@@ -2345,7 +2356,7 @@ struct test
     { 0xe2f1e1de, 256, 256, example_knot, "example_knot" },
     { 0xc02d01ea, 256, 256, example_icon, "example_icon" },
     { 0xa1607c4a, 256, 256, example_illusion, "example_illusion" },
-    { 0x7c861f87, 256, 256, example_star, "example_star" },
+    { 0x4e6fd9e3, 256, 256, example_star, "example_star" },
     { 0x429ca194, 256, 256, example_neon, "example_neon" },
 };
 

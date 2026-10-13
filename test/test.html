@@ -847,6 +847,22 @@ to see how the HTML5 API maps to the library's API and vice-versa.</p>
 </div>
 
 <div>
+<h2>line_<wbr>dash_<wbr>seam</h2>
+<canvas id="line_dash_seam" width="256" height="256"></canvas>
+<script type="text/javascript">
+    window.addEventListener( "load", function( event ) {
+        const element = document.getElementById( "line_dash_seam" );
+        const that = element.getContext( "2d" );
+        that.strokeStyle = "#000000";
+        that.lineCap = "butt";
+        that.lineWidth = 24.0;
+        that.setLineDash( [ 60.0, 30.0 ] );
+        that.strokeRect( 40.0, 80.0, 90.0, 60.0 );
+    } );
+</script>
+</div>
+
+<div>
 <h2>line_<wbr>dash_<wbr>overlap</h2>
 <canvas id="line_dash_overlap" width="256" height="256"></canvas>
 <script type="text/javascript">

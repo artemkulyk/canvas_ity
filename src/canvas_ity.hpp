@@ -1973,6 +1973,7 @@ void canvas::dash_lines()
                                    static_cast< ptrdiff_t >( count ) ),
                                  lines.points.end() );
                     lines.subpaths[ merge_subpath ].count += count;
+                    lines.subpaths[ merge_subpath ].closed = true;
                     lines.subpaths.pop_back();
                 }
             }
