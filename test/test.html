@@ -2138,6 +2138,28 @@ to see how the HTML5 API maps to the library's API and vice-versa.</p>
 </div>
 
 <div>
+<h2>clear_<wbr>rectangle_<wbr>styled</h2>
+<canvas id="clear_rectangle_styled" width="256" height="256"></canvas>
+<script type="text/javascript">
+    window.addEventListener( "load", function( event ) {
+        const element = document.getElementById( "clear_rectangle_styled" );
+        const that = element.getContext( "2d" );
+        const width = element.width;
+        const height = element.height;
+        that.fillStyle = "#ff0000";
+        that.fillRect( 0.0, 0.0, width, height );
+        that.fillStyle = "rgba(0,255,0,0.5)";
+        that.clearRect( 0.15 * width, 0.2 * height,
+                        0.3 * width, 0.6 * height );
+        const gradient = that.createLinearGradient( 0.0, 0.0, width, 0.0 );
+        that.fillStyle = gradient;
+        that.clearRect( 0.55 * width, 0.2 * height,
+                        0.3 * width, 0.6 * height );
+    } );
+</script>
+</div>
+
+<div>
 <h2>fill_<wbr>rectangle</h2>
 <canvas id="fill_rectangle" width="256" height="256"></canvas>
 <script type="text/javascript">

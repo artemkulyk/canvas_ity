@@ -1565,6 +1565,18 @@ void clear_rectangle( canvas &that, float width, float height )
     that.stroke();
 }
 
+void clear_rectangle_styled( canvas &that, float width, float height )
+{
+    that.set_color( fill_style, 1.0f, 0.0f, 0.0f, 1.0f );
+    that.fill_rectangle( 0.0f, 0.0f, width, height );
+    that.set_color( fill_style, 0.0f, 1.0f, 0.0f, 0.5f );
+    that.clear_rectangle( 0.15f * width, 0.2f * height,
+                          0.3f * width, 0.6f * height );
+    that.set_linear_gradient( fill_style, 0.0f, 0.0f, width, 0.0f );
+    that.clear_rectangle( 0.55f * width, 0.2f * height,
+                          0.3f * width, 0.6f * height );
+}
+
 void fill_rectangle( canvas &that, float width, float height )
 {
     that.set_color( stroke_style, 0.0f, 0.0f, 0.0f, 1.0f );
@@ -2298,6 +2310,7 @@ struct test
     { 0xc2188d67, 256, 256, is_point_in_path, "is_point_in_path" },
     { 0x6505bdc9, 256, 256, is_point_in_path_offscreen, "is_point_in_path_offscreen" },
     { 0x5e792c96, 256, 256, clear_rectangle, "clear_rectangle" },
+    { 0x853f788c, 256, 256, clear_rectangle_styled, "clear_rectangle_styled" },
     { 0x286e96fa, 256, 256, fill_rectangle, "fill_rectangle" },
     { 0xc2b0803d, 256, 256, stroke_rectangle, "stroke_rectangle" },
     { 0xe6c4d9c7, 256, 256, text_align, "text_align" },

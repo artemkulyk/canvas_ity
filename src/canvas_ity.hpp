@@ -4179,11 +4179,14 @@ void canvas::clear_rectangle(
     float saved_global_alpha = global_alpha;
     float saved_alpha = shadow_color.a;
     paint_brush::types saved_type = fill_brush.type;
+    std::vector< rgba > saved_colors = fill_brush.colors;
     global_composite_operation = destination_out;
     global_alpha = 1.0f;
     shadow_color.a = 0.0f;
     fill_brush.type = paint_brush::color;
+    fill_brush.colors.assign( 1, rgba( 0.0f, 0.0f, 0.0f, 1.0f ) );
     fill_rectangle( x, y, width, height );
+    fill_brush.colors.swap( saved_colors );
     fill_brush.type = saved_type;
     shadow_color.a = saved_alpha;
     global_alpha = saved_global_alpha;
